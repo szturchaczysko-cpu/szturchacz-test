@@ -31,9 +31,13 @@ def col(name):
 try: locale.setlocale(locale.LC_TIME, "pl_PL.UTF-8")
 except: pass
 
-# --- 1. POŁĄCZENIA (z Routera app.py) ---
-db = globals().get('db')
-cookies = globals().get('cookies')
+# --- 1. POŁĄCZENIA (TEST — bez routera) ---
+if not firebase_admin._apps:
+    creds_dict = json.loads(st.secrets["FIREBASE_CREDS"])
+    cred = credentials.Certificate(creds_dict)
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
+cookies = None
 
 # Pobieranie listy projektów z Secrets
 try:
