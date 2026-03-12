@@ -31,13 +31,9 @@ def col(name):
 try: locale.setlocale(locale.LC_TIME, "pl_PL.UTF-8")
 except: pass
 
-# --- 1. POŁĄCZENIA (TEST — bez routera) ---
-if not firebase_admin._apps:
-    creds_dict = json.loads(st.secrets["FIREBASE_CREDS"])
-    cred = credentials.Certificate(creds_dict)
-    firebase_admin.initialize_app(cred)
-db = firestore.client()
-cookies = None
+# --- 1. POŁĄCZENIA (z Routera app.py) ---
+db = globals().get('db')
+cookies = globals().get('cookies')
 
 # Pobieranie listy projektów z Secrets
 try:
@@ -51,34 +47,24 @@ except:
 # ==========================================
 # 🔑 CONFIG I TOŻSAMOŚĆ (identyczne jak prod)
 # ==========================================
-
-# --- BRAMKA LOGOWANIA (TEST) ---
-if "operator" not in st.session_state:
-    st.title("🧪 Szturchacz EW TEST")
-    op = st.selectbox("Operator:", ["Sylwia"])
-    if st.button("Zaloguj"):
-        st.session_state.operator = op
-        st.rerun()
-    st.stop()
-
 op_name = st.session_state.operator
 cfg_ref = db.collection(col("operator_configs")).document(op_name)
 cfg = cfg_ref.get().to_dict() or {}
 
 # --- AUTO-SEED (test mode) ---
-if TEST_MODE:
+if TEST_MODE and not cfg:
     # Kopiuj config z produkcji lub ustaw defaulty
     prod_cfg = db.collection("operator_configs").document(op_name).get().to_dict() or {}
     if prod_cfg:
         cfg = prod_cfg
     else:
         cfg = {
-        "role": "Operatorzy_FR",
-        "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/v4_forum.txt",
-        "prompt_name": "v4 forum",
-        "assigned_key_index": 1,
-        "tel": False,
-    }
+            "role": "Operatorzy_DE",
+            "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/prompt4624.txt",
+            "prompt_name": "v4",
+            "assigned_key_index": 1,
+            "tel": False,
+        }
     cfg_ref.set(cfg, merge=True)
     st.toast(f"🧪 Auto-seed: {op_name} config utworzony w test_operator_configs")
     
@@ -182,9 +168,10 @@ def ew_get_next_case(grupa, op_name):
         q = (db.collection(col("ew_cases"))
              .where("grupa", "==", grupa)
              .where("status", "==", "wolny")
-             .order_by("score", direction=firestore.Query.DESCENDING)
-             .limit(100))
-        all_free = [d for d in q.get() if d.id not in skipped_ids]
+             .limit(500))
+        all_free_raw = q.get()
+        all_free_raw = sorted(all_free_raw, key=lambda d: d.to_dict().get("score", 0), reverse=True)
+        all_free = [d for d in all_free_raw if d.id not in skipped_ids]
     except Exception:
         return None
     
