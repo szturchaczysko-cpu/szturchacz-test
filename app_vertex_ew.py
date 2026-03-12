@@ -66,19 +66,19 @@ cfg_ref = db.collection(col("operator_configs")).document(op_name)
 cfg = cfg_ref.get().to_dict() or {}
 
 # --- AUTO-SEED (test mode) ---
-if TEST_MODE and not cfg:
+if TEST_MODE:
     # Kopiuj config z produkcji lub ustaw defaulty
     prod_cfg = db.collection("operator_configs").document(op_name).get().to_dict() or {}
     if prod_cfg:
         cfg = prod_cfg
     else:
         cfg = {
-            "role": "Operatorzy_DE",
-            "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/v4_forum.txt",
-            "prompt_name": "v4",
-            "assigned_key_index": 1,
-            "tel": False,
-        }
+        "role": "Operatorzy_FR",
+        "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/v4_forum.txt",
+        "prompt_name": "v4 forum",
+        "assigned_key_index": 1,
+        "tel": False,
+    }
     cfg_ref.set(cfg, merge=True)
     st.toast(f"🧪 Auto-seed: {op_name} config utworzony w test_operator_configs")
     
