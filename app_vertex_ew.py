@@ -31,9 +31,13 @@ def col(name):
 try: locale.setlocale(locale.LC_TIME, "pl_PL.UTF-8")
 except: pass
 
-# --- 1. POŁĄCZENIA (z Routera app.py) ---
-db = globals().get('db')
-cookies = globals().get('cookies')
+# --- 1. POŁĄCZENIA (TEST — bez routera) ---
+if not firebase_admin._apps:
+    creds_dict = json.loads(st.secrets["FIREBASE_CREDS"])
+    cred = credentials.Certificate(creds_dict)
+    firebase_admin.initialize_app(cred)
+db = firestore.client()
+cookies = None
 
 # Pobieranie listy projektów z Secrets
 try:
@@ -44,6 +48,16 @@ except:
     st.error("🚨 Błąd: Brak listy GCP_PROJECT_IDS w secrets!")
     st.stop()
 
+# --- BRAMKA LOGOWANIA (TEST) ---
+if "operator" not in st.session_state:
+    st.set_page_config(page_title="🧪 Szturchacz EW TEST", layout="wide", page_icon="🧪")
+    st.title("🧪 Szturchacz EW TEST")
+    op = st.selectbox("Operator:", ["Sylwia"])
+    if st.button("Zaloguj"):
+        st.session_state.operator = op
+        st.rerun()
+    st.stop()
+
 # ==========================================
 # 🔑 CONFIG I TOŻSAMOŚĆ (identyczne jak prod)
 # ==========================================
@@ -52,30 +66,15 @@ cfg_ref = db.collection(col("operator_configs")).document(op_name)
 cfg = cfg_ref.get().to_dict() or {}
 
 # --- AUTO-SEED (test mode) ---
-if TEST_MODE and not cfg:
-    # Kopiuj config z produkcji lub ustaw defaulty
-    prod_cfg = db.collection("operator_configs").document(op_name).get().to_dict() or {}
-    if prod_cfg:
-        cfg = prod_cfg
-    else:
-        cfg = {
-            "role": "Operatorzy_DE",
-            "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/prompt4624.txt",
-            "prompt_name": "v4",
-            "assigned_key_index": 1,
-            "tel": False,
-        }
+if TEST_MODE:
+    cfg = {
+        "role": "Operatorzy_FR",
+        "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/v4_forum.txt",
+        "prompt_name": "v4 forum",
+        "assigned_key_index": 1,
+        "tel": False,
+    }
     cfg_ref.set(cfg, merge=True)
-    st.toast(f"🧪 Auto-seed: {op_name} config utworzony w test_operator_configs")
-    
-    # Seed custom_prompts
-    _p_doc = db.collection(col("admin_config")).document("custom_prompts").get()
-    if not _p_doc.exists or not (_p_doc.to_dict() or {}).get("urls"):
-        _prod_p = db.collection("admin_config").document("custom_prompts").get().to_dict() or {}
-        _urls = _prod_p.get("urls", {})
-        _urls["v4 forum"] = "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/v4_forum.txt"
-        db.collection(col("admin_config")).document("custom_prompts").set({"urls": _urls}, merge=True)
-        st.toast("🧪 Auto-seed: test_admin_config/custom_prompts utworzony")
 
 # --- PROJEKT GCP ---
 fixed_key_idx = int(cfg.get("assigned_key_index", 1))
