@@ -47,6 +47,16 @@ except:
 # ==========================================
 # 🔑 CONFIG I TOŻSAMOŚĆ (identyczne jak prod)
 # ==========================================
+
+# --- BRAMKA LOGOWANIA (TEST) ---
+if "operator" not in st.session_state:
+    st.title("🧪 Szturchacz EW TEST")
+    op = st.selectbox("Operator:", ["Sylwia"])
+    if st.button("Zaloguj"):
+        st.session_state.operator = op
+        st.rerun()
+    st.stop()
+
 op_name = st.session_state.operator
 cfg_ref = db.collection(col("operator_configs")).document(op_name)
 cfg = cfg_ref.get().to_dict() or {}
