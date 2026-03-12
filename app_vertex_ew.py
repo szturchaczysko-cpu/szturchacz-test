@@ -60,7 +60,7 @@ if TEST_MODE and not cfg:
     else:
         cfg = {
             "role": "Operatorzy_DE",
-            "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/prompt4624.txt",
+            "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/v4_forum.txt",
             "prompt_name": "v4",
             "assigned_key_index": 1,
             "tel": False,
