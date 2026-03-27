@@ -16,6 +16,7 @@ Nick bota: chatoszturek
 import re
 import json
 import requests
+import traceback
 import streamlit as st
 
 
@@ -50,21 +51,6 @@ def _headers():
 # ==========================================
 
 def forum_write(post_id, do_odp_id, user_do, tresc, user_do_type=1, user_od=None):
-    """
-    Tworzy post na forum.
-    
-    Args:
-        post_id: ID wątku (thread.id) — np. 5351 (AUTOS_KURIERZY)
-        do_odp_id: ID wpisu na który odpowiadamy (subThread.id)
-        user_do: nick odbiorcy (np. "justyna") lub nazwa grupy (np. "AUTOS_KURIERZY")
-        tresc: treść HTML postu
-        user_do_type: 1=user, 2=grupa
-        user_od: nick nadawcy (domyślnie FORUM_USER)
-    
-    Returns:
-        dict: {"success": True, "new_post_id": 1461172, "message": "..."} 
-              lub {"success": False, "error": "..."}
-    """
     if user_od is None:
         user_od = FORUM_USER
     
@@ -105,20 +91,16 @@ def forum_write(post_id, do_odp_id, user_do, tresc, user_do_type=1, user_od=None
         data = resp.json()
         
         if data.get("status") == "SUCCESS":
-            # Wyciągnij ID nowego postu z message
             msg = data.get("message", "")
-            # Próbuj różne formaty: (id: 123), id: 123, (id:123), "id": 123
             id_match = re.search(r'\(id:\s*(\d+)\)', msg)
             if not id_match:
                 id_match = re.search(r'id[:\s]+(\d+)', msg, re.IGNORECASE)
             if not id_match:
-                # Szukaj dowolnej liczby > 1000000 (typowe ID postów)
                 id_match = re.search(r'(\d{7,})', msg)
             new_id = int(id_match.group(1)) if id_match else None
             
             _flog(f"WRITE RESULT: success=True, new_id={new_id}, msg={msg[:100]}")
             
-            # Debug: loguj co API zwróciło (widoczne w st.toast)
             if not new_id:
                 import streamlit as _st
                 _st.toast(f"⚠️ Forum API OK ale brak ID w: {msg[:200]}")
@@ -141,19 +123,6 @@ def forum_write(post_id, do_odp_id, user_do, tresc, user_do_type=1, user_od=None
 # ==========================================
 
 def forum_read(branch_id=None, root_id=None, leaf_id=None, max_pages=5):
-    """
-    Czyta podwątek z forum.
-    
-    Args:
-        branch_id: ID podwątku (poziom 0) — najczęściej używane
-        root_id: ID całego wątku
-        leaf_id: ID konkretnego wpisu
-        max_pages: max stron do pobrania (paginacja)
-    
-    Returns:
-        dict: {"success": True, "posts": [...], "thread_title": "..."} 
-              lub {"success": False, "error": "..."}
-    """
     all_posts = []
     thread_title = ""
     
@@ -204,7 +173,6 @@ def forum_read(branch_id=None, root_id=None, leaf_id=None, max_pages=5):
                     "Hierarchy": p.get("Hierarchy", ""),
                 })
             
-            # Sprawdź czy są kolejne strony
             paging = tree.get("PagingInfo", {})
             total_pages = paging.get("TotalPages", 1)
             if page >= total_pages:
@@ -224,21 +192,10 @@ def forum_read(branch_id=None, root_id=None, leaf_id=None, max_pages=5):
 
 
 def forum_read_subtree(branch_id, from_post_id):
-    """
-    Czyta podwątek i filtruje posty od konkretnego wpisu w dół (po Hierarchy).
-    
-    Args:
-        branch_id: ID podwątku (branch)
-        from_post_id: ID wpisu od którego chcemy czytać w dół
-    
-    Returns:
-        jak forum_read, ale przefiltrowane
-    """
     result = forum_read(branch_id=branch_id)
     if not result["success"]:
         return result
     
-    # Znajdź hierarchy startowego posta
     start_hierarchy = None
     for p in result["posts"]:
         if p["Id"] == from_post_id:
@@ -246,10 +203,8 @@ def forum_read_subtree(branch_id, from_post_id):
             break
     
     if not start_hierarchy:
-        # Post nie znaleziony — zwróć wszystko
         return result
     
-    # Filtruj: posty których Hierarchy zaczyna się od start_hierarchy
     filtered = [p for p in result["posts"] if p["Hierarchy"].startswith(start_hierarchy)]
     
     return {
@@ -267,14 +222,12 @@ def forum_read_subtree(branch_id, from_post_id):
 FORUM_MARKER_PATTERN = re.compile(r'\[FORUM_(WRITE|READ)\|([^\]]+)\]', re.DOTALL)
 
 def parse_forum_markers(ai_response):
-    """Parsuje markery forum z odpowiedzi AI."""
     markers = []
     
     for m in FORUM_MARKER_PATTERN.finditer(ai_response):
-        action = m.group(1).lower()  # "write" lub "read"
+        action = m.group(1).lower()
         params_str = m.group(2)
         
-        # Parsuj key=value pary (tresc może zawierać |)
         params = {}
         if action == "write" and "|tresc=" in params_str:
             before_tresc, tresc = params_str.split("|tresc=", 1)
@@ -306,9 +259,6 @@ def parse_forum_markers(ai_response):
 
 
 def execute_forum_actions(ai_response, forum_memory=None):
-    """
-    Parsuje markery → wykonuje API calls → zwraca podmienioną odpowiedź.
-    """
     markers = parse_forum_markers(ai_response)
     
     if not markers:
@@ -345,6 +295,7 @@ def execute_forum_actions(ai_response, forum_memory=None):
             forum_writes.append(result)
             
             if result.get("success"):
+                # Nie nadpisuj lokalnego memory nowym ID (Z transkryptu)
                 if cel not in forum_memory:
                     forum_memory[cel] = {"id": result.get("FORUM_ID"), "new_subthread": USE_NEW_SUBTHREADS}
                 replacement = (
@@ -365,7 +316,8 @@ def execute_forum_actions(ai_response, forum_memory=None):
                 if USE_NEW_SUBTHREADS:
                     result = forum_read(branch_id=forum_id, max_pages=3)
                 else:
-                    result = forum_read(leaf_id=forum_id, max_pages=3)
+                    thread_info = FORUM_THREADS.get(cel, {})
+                    result = forum_read(leaf_id=forum_id, root_id=thread_info.get("post_id"), max_pages=3)
             elif cel and forum_memory and cel in forum_memory:
                 mem_id = forum_memory[cel].get("id")
                 if mem_id:
@@ -376,7 +328,8 @@ def execute_forum_actions(ai_response, forum_memory=None):
                         if thread_info and thread_info.get("korzen_id"):
                             result = forum_read_subtree(branch_id=thread_info["korzen_id"], from_post_id=mem_id)
                         else:
-                            result = forum_read(leaf_id=mem_id, max_pages=3)
+                            # Zmiana z transkryptu: filtruj z głównego wątku w dół po ID
+                            result = forum_read_subtree(branch_id=thread_info.get("post_id"), from_post_id=mem_id)
                 else:
                     result = {"success": False, "error": f"Brak ID w pamięci dla {cel}"}
             elif cel:
@@ -417,9 +370,7 @@ def execute_forum_actions(ai_response, forum_memory=None):
         "had_actions": True
     }
 
-
 def _strip_html(text):
-    """Usuń tagi HTML z tekstu."""
     return re.sub(r'<[^>]+>', ' ', text).strip()
 
 
@@ -520,8 +471,6 @@ FORUM_THREADS = _FORUM_THREADS_TEST if FORUM_TEST_MODE else _FORUM_THREADS_PROD
 
 
 def discover_roots():
-    """Odkryj korzenie (pierwszy post z Do_Odpid=0) każdego wątku.
-    Cache w session_state."""
     cached = st.session_state.get("_forum_roots", {})
     if cached:
         for key, kid in cached.items():
@@ -547,7 +496,6 @@ def discover_roots():
 
 
 def get_thread_info(cel):
-    """Zwraca info o wątku. Odkrywa korzeń jeśli nieznany."""
     info = FORUM_THREADS.get(cel)
     if not info:
         return None
@@ -557,15 +505,12 @@ def get_thread_info(cel):
 
 
 def forum_write_to_thread(cel, tresc, user_do=None, do_odp_id=None, forum_memory=None):
-    """Pisze na forum do wątku po nazwie celu (np. 'AUTOS_KURIERZY')."""
     info = get_thread_info(cel)
     if not info:
         _flog(f"WRITE_TO_THREAD: cel={cel} → NIEZNANY CEL")
         return {"success": False, "error": f"Nieznany cel: {cel}"}
     
     _flog(f"WRITE_TO_THREAD: cel={cel}, do_odp_id={do_odp_id}, USE_NEW={USE_NEW_SUBTHREADS}")
-    _flog(f"  thread_info: post_id={info.get('post_id')}, korzen_id={info.get('korzen_id')}")
-    _flog(f"  forum_memory: {forum_memory}")
     
     if do_odp_id:
         target_do_odp = do_odp_id
@@ -577,8 +522,9 @@ def forum_write_to_thread(cel, tresc, user_do=None, do_odp_id=None, forum_memory
         target_do_odp = None
         _flog(f"  DECYZJA: NOWY PODWĄTEK (USE_NEW=True, do_odp_id=None)")
     else:
+        # Zmiana z transkryptu (nie crashuj, jeśli nie ma korzenia)
         target_do_odp = info.get("korzen_id")
-        if target_do_odp:
+        if target_do_odp is not None:
             _flog(f"  DECYZJA: workaround korzen_id={target_do_odp}")
         else:
             target_do_odp = 0
@@ -604,7 +550,6 @@ def forum_write_to_thread(cel, tresc, user_do=None, do_odp_id=None, forum_memory
 
 
 def forum_read_by_forum_id(forum_id):
-    """Czyta podwątek od konkretnego FORUM_ID."""
     result = forum_read(leaf_id=forum_id, max_pages=1)
     if result["success"] and result["posts"]:
         first = result["posts"][0]
@@ -626,14 +571,12 @@ CHATOSZTUREK_DISCLAIMER = (
 # ==========================================
 
 def save_forum_memory(db, col_fn, numer_zamowienia, cel, forum_id, co=""):
-    """Zapisz forum_id do pamięci trwałej (po numerze zamówienia)."""
     from datetime import datetime
     import pytz
     tz_pl = pytz.timezone('Europe/Warsaw')
     data_str = datetime.now(tz_pl).strftime("%Y-%m-%d %H:%M")
     
     _flog(f"SAVE_MEMORY: nrzam={numer_zamowienia}, cel={cel}, forum_id={forum_id}")
-    _flog(f"  kolekcja: {col_fn('forum_memory')}")
     
     entry = {
         "id": forum_id,
@@ -647,6 +590,7 @@ def save_forum_memory(db, col_fn, numer_zamowienia, cel, forum_id, co=""):
         existing = doc_ref.get()
         if existing.exists:
             existing_posts = existing.to_dict().get("forum_posts", {})
+            # Zmiana z transkryptu (nie nadpisuj id, żeby czytał całą historię)
             if cel in existing_posts:
                 _flog(f"  → JUŻ ISTNIEJE (nie nadpisuję, pierwotny id={existing_posts[cel].get('id')})")
                 return
@@ -658,108 +602,95 @@ def save_forum_memory(db, col_fn, numer_zamowienia, cel, forum_id, co=""):
 
 
 def load_forum_memory(db, col_fn, numer_zamowienia):
-    """Wczytaj pamięć forumową dla zamówienia."""
-    _flog(f"LOAD_MEMORY: nrzam={numer_zamowienia}, kolekcja={col_fn('forum_memory')}")
     try:
         doc = db.collection(col_fn("forum_memory")).document(str(numer_zamowienia)).get()
         if doc.exists:
             result = doc.to_dict().get("forum_posts", {})
-            _flog(f"  → ZNALEZIONO: {json.dumps({k: v.get('id') for k,v in result.items()}) if result else 'puste'}")
             return result
-        else:
-            _flog(f"  → BRAK dokumentu w Firestore")
     except Exception as e:
-        _flog(f"  → BŁĄD: {e}")
+        _flog(f"LOAD_MEMORY BŁĄD: {e}")
     return {}
 
 
 def auto_load_forum_context(db, col_fn, numer_zamowienia):
-    """Automatycznie odpytaj forum. Fallback: scan po numerze zamówienia."""
     _flog(f"AUTO_LOAD: start, nrzam={numer_zamowienia}")
-    memory = load_forum_memory(db, col_fn, numer_zamowienia)
     
-    if not memory:
-        _flog(f"AUTO_LOAD: pamięć pusta → scan forum po nrzam={numer_zamowienia}")
-        memory = _scan_forum_for_case(db, col_fn, str(numer_zamowienia))
-    
-    if not memory:
-        _flog(f"AUTO_LOAD: scan też pusty → zwracam pusty kontekst")
-        return ""
-    
-    _flog(f"AUTO_LOAD: mam dane: {list(memory.keys())}")
-    
-    context_parts = []
-    for cel, info in memory.items():
-        forum_id = info.get("id")
-        if not forum_id:
-            continue
+    try:
+        memory = load_forum_memory(db, col_fn, numer_zamowienia)
         
-        is_new_subthread = info.get("new_subthread", USE_NEW_SUBTHREADS)
-        _flog(f"AUTO_LOAD: czytam {cel}, forum_id={forum_id}, new_sub={is_new_subthread}")
+        if not memory:
+            memory = _scan_forum_for_case(db, col_fn, str(numer_zamowienia))
         
-        thread_info = FORUM_THREADS.get(cel, {})
-        root_id = thread_info.get("post_id")
+        if not memory:
+            _flog(f"AUTO_LOAD: scan też pusty → zwracam pusty kontekst")
+            return ""
         
-        if is_new_subthread:
-            result = forum_read(branch_id=forum_id, root_id=root_id, max_pages=2)
-        else:
-            if thread_info and thread_info.get("korzen_id"):
-                _flog(f"  → subtree: branch={thread_info['korzen_id']}, from={forum_id}")
-                result = forum_read_subtree(
-                    branch_id=thread_info["korzen_id"],
-                    from_post_id=forum_id
-                )
-            else:
-                _flog(f"  → leaf: forum_id={forum_id} (czytam jako leaf)")
-                result = forum_read(leaf_id=forum_id, root_id=root_id, max_pages=3)
-        
-        _flog(f"  → wynik: success={result.get('success')}, count={result.get('count', 0)}")
-        
-        co = info.get("co", cel)
-        
-        if result.get("success") and result.get("posts"):
-            posts = result["posts"][-10:]
-            other_posts = [p for p in posts if p.get("UserAddName") != FORUM_USER or p.get("Id") != forum_id]
+        context_parts = []
+        for cel, info in memory.items():
+            forum_id = info.get("id")
+            if not forum_id:
+                continue
             
-            if other_posts:
-                context_parts.append(f"[FORUM_CONTEXT: {cel}] ({co}, {result['count']} postów)")
-            else:
-                context_parts.append(f"[FORUM_CONTEXT: {cel}] ({co}, brak nowych odpowiedzi)")
+            is_new_subthread = info.get("new_subthread", USE_NEW_SUBTHREADS)
+            _flog(f"AUTO_LOAD: czytam {cel}, forum_id={forum_id}, new_sub={is_new_subthread}")
             
-            for p in posts:
-                date_str = p['DateAdd'][:10] if p.get('DateAdd') else '?'
-                context_parts.append(
-                    f"  [{date_str}] {p['UserAddName']} → {p['UserToName']}: "
-                    f"{_strip_html(p['Text'][:400])}"
-                )
-        else:
-            err_msg = result.get("error", "API zwróciło pustą listę")
-            _flog(f"  → UWAGA: błąd lub brak postów ({err_msg}). Dodaję bezpiecznik do kontekstu.")
-            context_parts.append(f"[FORUM_CONTEXT: {cel}] ({co}, w pamięci istnieje wpis ID={forum_id}, ale wystąpił problem z odczytem z forum. Zakładam: brak nowych odpowiedzi.)")
+            thread_info = FORUM_THREADS.get(cel, {})
+            root_id = thread_info.get("post_id")
+            
+            if is_new_subthread:
+                result = forum_read(branch_id=forum_id, root_id=root_id, max_pages=2)
+            else:
+                if thread_info and thread_info.get("korzen_id"):
+                    _flog(f"  → subtree: branch={thread_info['korzen_id']}, from={forum_id}")
+                    result = forum_read_subtree(branch_id=thread_info["korzen_id"], from_post_id=forum_id)
+                else:
+                    # Zmiana z transkryptu: czytaj cały wątek i filtruj, zamiast branch_id=forum_id
+                    _flog(f"  → subtree (brak korzenia): root={root_id}, from={forum_id}")
+                    result = forum_read_subtree(branch_id=root_id, from_post_id=forum_id)
+                    
+                    if not result.get("success"):
+                         _flog(f"  → fallback leaf: forum_id={forum_id}")
+                         result = forum_read(leaf_id=forum_id, root_id=root_id, max_pages=1)
+            
+            co = info.get("co", cel)
+            
+            if result.get("success") and result.get("posts"):
+                posts = result["posts"][-10:]
+                other_posts = [p for p in posts if p.get("UserAddName") != FORUM_USER or p.get("Id") != forum_id]
+                
+                if other_posts:
+                    context_parts.append(f"[FORUM_CONTEXT: {cel}] ({co}, {result['count']} postów)")
+                else:
+                    context_parts.append(f"[FORUM_CONTEXT: {cel}] ({co}, brak nowych odpowiedzi)")
+                
+                for p in posts:
+                    date_str = p['DateAdd'][:10] if p.get('DateAdd') else '?'
+                    context_parts.append(
+                        f"  [{date_str}] {p['UserAddName']} → {p['UserToName']}: "
+                        f"{_strip_html(p['Text'][:400])}"
+                    )
+            else:
+                err_msg = result.get("error", "API zwróciło pustą listę")
+                _flog(f"  → UWAGA: błąd lub brak postów ({err_msg}). Dodaję bezpiecznik.")
+                context_parts.append(f"[FORUM_CONTEXT: {cel}] ({co}, w pamięci istnieje wpis ID={forum_id}, ale wystąpił problem z odczytem z forum. Zakładam: brak nowych odpowiedzi.)")
 
-    if context_parts:
-        return "\n".join(context_parts)
-    return ""
+        if context_parts:
+            return "\n".join(context_parts)
+        return ""
+        
+    except Exception as e:
+        _flog(f"AUTO_LOAD BŁĄD KRYTYCZNY: {e}\n{traceback.format_exc()}")
+        return ""
 
 
 def load_forum_context_by_id(db, col_fn, numer_zamowienia, cel, forum_id):
-    """
-    Czyta wątek forum po podanym ID (niezależnie od usera który pisał).
-    """
     _flog(f"LOAD_BY_ID: nrzam={numer_zamowienia}, cel={cel}, forum_id={forum_id}")
 
     thread_info = FORUM_THREADS.get(cel)
     if thread_info and thread_info.get("korzen_id"):
-        _flog(f"  → subtree: korzen={thread_info['korzen_id']}, from={forum_id}")
-        result = forum_read_subtree(
-            branch_id=thread_info["korzen_id"],
-            from_post_id=forum_id
-        )
+        result = forum_read_subtree(branch_id=thread_info["korzen_id"], from_post_id=forum_id)
     else:
-        _flog(f"  → leaf: forum_id={forum_id}")
         result = forum_read(leaf_id=forum_id, max_pages=3)
-
-    _flog(f"  → wynik: success={result.get('success')}, count={result.get('count', 0)}")
 
     context_parts = []
     if result.get("success") and result.get("posts"):
@@ -773,7 +704,6 @@ def load_forum_context_by_id(db, col_fn, numer_zamowienia, cel, forum_id):
             )
         try:
             save_forum_memory(db, col_fn, numer_zamowienia, cel, forum_id, f"manual: {cel}")
-            _flog(f"  → zapisano do forum_memory: {cel}={forum_id}")
         except Exception as e:
             _flog(f"  → błąd zapisu memory: {e}")
     else:
@@ -790,7 +720,6 @@ def load_forum_context_by_id(db, col_fn, numer_zamowienia, cel, forum_id):
 
 
 def _scan_forum_for_case(db, col_fn, numer_zamowienia):
-    """Fallback: przeszukaj wątki forum po numerze zamówienia."""
     found = {}
     nrzam = str(numer_zamowienia)
     _flog(f"SCAN: szukam {nrzam} w wątkach forum")
@@ -806,8 +735,6 @@ def _scan_forum_for_case(db, col_fn, numer_zamowienia):
             result = forum_read(root_id=post_id, max_pages=3)
             if not result.get("success") or not result.get("posts"):
                 continue
-            
-            _flog(f"SCAN: wątek {post_id} → {result['count']} postów")
             
             for post in result["posts"]:
                 if post.get("UserAddName") != FORUM_USER:
@@ -846,7 +773,6 @@ def _scan_forum_for_case(db, col_fn, numer_zamowienia):
                 
                 if matched_cel and matched_cel not in found:
                     is_root = post.get("Do_Odpid") == 0 or post.get("Level") == 0
-                    _flog(f"SCAN FOUND: {matched_cel} → forum_id={post_forum_id}, is_root={is_root}")
                     found[matched_cel] = {
                         "id": post_forum_id,
                         "new_subthread": is_root,
@@ -860,5 +786,4 @@ def _scan_forum_for_case(db, col_fn, numer_zamowienia):
             _flog(f"SCAN ERROR: {e}")
             continue
     
-    _flog(f"SCAN RESULT: {list(found.keys()) if found else 'nic'}")
     return found if found else None
