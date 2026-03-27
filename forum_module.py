@@ -191,47 +191,53 @@ def forum_read(branch_id=None, root_id=None, leaf_id=None, max_pages=5):
     }
 
 
-def forum_read_subtree(branch_id, from_post_id, nrzam=None):
+def forum_read_subtree(branch_id=None, leaf_id=None, root_id=None, from_post_id=None, nrzam=None):
     """
-    Czyta wątek forum i wyciąga post_id oraz powiązane z nim odpowiedzi.
-    Rozszerzone zabezpieczenia: jeśli ktoś odpowie poza drzewkiem (hierarchy),
-    ale użyje numeru zamówienia, też to złapie.
+    Czyta wątek forum i wyciąga ORAZ FILTRUJE powiązane odpowiedzi.
+    Rozszerzone zabezpieczenia, które ZAWSZE odcinają śmietnik z innych zamówień,
+    nawet w trybie awaryjnego doczytywania (fallback leaf).
     """
-    result = forum_read(branch_id=branch_id)
-    if not result["success"]:
+    result = forum_read(branch_id=branch_id, root_id=root_id, leaf_id=leaf_id)
+    if not result.get("success"):
         return result
     
     start_hierarchy = None
+    root_text = ""
     for p in result["posts"]:
         if p["Id"] == from_post_id:
             start_hierarchy = p["Hierarchy"]
+            root_text = p.get("Text", "")
             break
     
-    # Blokada śmietnika: jeśli nie ma w hierarchii i brakuje nrzam, rzuć fałsz, 
-    # żeby nie wciągać całego potężnego wątku do prompta.
+    # BEZPIECZNIK: Sprawdzamy, czy wczytany post faktycznie dotyczy naszego zamówienia
+    if start_hierarchy and nrzam:
+        if str(nrzam) not in root_text:
+            _flog(f"  → UWAGA! Post {from_post_id} dotyczy innego numeru niż {nrzam}! Ignoruję to fałszywe ID.")
+            start_hierarchy = None  
+    
     if not start_hierarchy and not nrzam:
-        return {"success": False, "error": f"Nie znaleziono wpisu {from_post_id}"}
+        return {"success": False, "error": f"Nie znaleziono wpisu {from_post_id} lub fałszywe ID"}
     
     filtered = []
     seen_ids = set()
     for p in result["posts"]:
         pid = p["Id"]
         
-        # 1. Pasuje do drzewka odpowiedzi
+        # 1. Pasuje do drzewka odpowiedzi (i przeszło bezpiecznik)
         if start_hierarchy and p["Hierarchy"].startswith(start_hierarchy):
             if pid not in seen_ids:
                 filtered.append(p)
                 seen_ids.add(pid)
             continue
             
-        # 2. Pasuje po numerze zamówienia (nawet jeśli ktoś źle kliknął 'odpowiedz')
+        # 2. Pasuje po numerze zamówienia (nawet z błędem w hierarchii lub trybem awaryjnym)
         if nrzam and str(nrzam) in p.get("Text", ""):
             if pid not in seen_ids:
                 filtered.append(p)
                 seen_ids.add(pid)
                 
     if not filtered:
-        return {"success": False, "error": f"Brak powiązanych postów dla {from_post_id}"}
+        return {"success": False, "error": f"Brak powiązanych postów dla zamówienia {nrzam}"}
         
     filtered = sorted(filtered, key=lambda x: x.get("DateAdd", ""))
     
@@ -352,10 +358,12 @@ def execute_forum_actions(ai_response, forum_memory=None):
                         result = forum_read(branch_id=mem_id, max_pages=3)
                     else:
                         thread_info = FORUM_THREADS.get(cel)
-                        if thread_info and thread_info.get("korzen_id"):
-                            result = forum_read_subtree(thread_info["korzen_id"], mem_id, None)
+                        if thread_info and thread_info.get("korzen_id") and thread_info.get("korzen_id") != "DIRECT":
+                            result = forum_read_subtree(branch_id=thread_info["korzen_id"], from_post_id=mem_id, nrzam=None)
                         else:
-                            result = forum_read_subtree(thread_info.get("post_id"), mem_id, None)
+                            result = forum_read_subtree(branch_id=mem_id, from_post_id=mem_id, nrzam=None)
+                            if not result.get("success"):
+                                result = forum_read_subtree(leaf_id=mem_id, root_id=thread_info.get("post_id"), from_post_id=mem_id, nrzam=None)
                 else:
                     result = {"success": False, "error": f"Brak ID w pamięci dla {cel}"}
             elif cel:
@@ -482,12 +490,12 @@ _FORUM_THREADS_TEST = {
         "opis": "TEST: Czatosztur UKPL",
     },
     "KURIER_test": {
-        "post_id": 5680, "korzen_id": None,
+        "post_id": 5680, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
         "opis": "TEST: Zlecenia kurierskie (nowy wątek)",
     },
     "REKLA_test": {
-        "post_id": 5679, "korzen_id": None,
+        "post_id": 5679, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
         "opis": "TEST: Reklamacje / czy można szturchać (nowy wątek)",
     },
@@ -525,7 +533,7 @@ def get_thread_info(cel):
     info = FORUM_THREADS.get(cel)
     if not info:
         return None
-    if not info.get("korzen_id"):
+    if info.get("korzen_id") is None and cel not in ["KURIER_test", "REKLA_test"]:
         discover_roots()
     return info
 
@@ -549,7 +557,10 @@ def forum_write_to_thread(cel, tresc, user_do=None, do_odp_id=None, forum_memory
         _flog(f"  DECYZJA: NOWY PODWĄTEK (USE_NEW=True, do_odp_id=None)")
     else:
         target_do_odp = info.get("korzen_id")
-        if target_do_odp is not None:
+        if target_do_odp == "DIRECT":
+            target_do_odp = 0
+            _flog(f"  DECYZJA: tryb DIRECT → nowy post w wątku (do_odp_id=0)")
+        elif target_do_odp is not None:
             _flog(f"  DECYZJA: workaround korzen_id={target_do_odp}")
         else:
             target_do_odp = 0
@@ -664,16 +675,16 @@ def auto_load_forum_context(db, col_fn, numer_zamowienia):
             if is_new_subthread:
                 result = forum_read(branch_id=forum_id, root_id=root_id, max_pages=2)
             else:
-                if thread_info and thread_info.get("korzen_id"):
+                if thread_info and thread_info.get("korzen_id") and thread_info.get("korzen_id") != "DIRECT":
                     _flog(f"  → subtree: branch={thread_info['korzen_id']}, from={forum_id}")
-                    result = forum_read_subtree(thread_info["korzen_id"], forum_id, numer_zamowienia)
+                    result = forum_read_subtree(branch_id=thread_info["korzen_id"], from_post_id=forum_id, nrzam=numer_zamowienia)
                 else:
-                    _flog(f"  → subtree (brak korzenia): root={root_id}, from={forum_id}")
-                    result = forum_read_subtree(root_id, forum_id, numer_zamowienia)
+                    _flog(f"  → subtree (brak korzenia/DIRECT): branch={forum_id}, from={forum_id}")
+                    result = forum_read_subtree(branch_id=forum_id, from_post_id=forum_id, nrzam=numer_zamowienia)
                     
                     if not result.get("success"):
-                         _flog(f"  → fallback leaf: forum_id={forum_id}")
-                         result = forum_read(leaf_id=forum_id, root_id=root_id, max_pages=1)
+                         _flog(f"  → fallback leaf z filtrem: forum_id={forum_id}")
+                         result = forum_read_subtree(leaf_id=forum_id, root_id=root_id, from_post_id=forum_id, nrzam=numer_zamowienia)
             
             _flog(f"  → wynik odczytu: success={result.get('success')}, postow={result.get('count', 0)}")
             co = info.get("co", cel)
@@ -681,8 +692,6 @@ def auto_load_forum_context(db, col_fn, numer_zamowienia):
             if result.get("success") and result.get("posts"):
                 posts = result["posts"][-10:]
                 
-                # Zabezpieczenie: zliczamy do "odpowiedzi" tylko wpisy innych uzytkownikow! 
-                # (Dzieki temu bot ignoruje wlasne wpisy/podbicia)
                 human_replies = [p for p in posts if p.get("UserAddName") != FORUM_USER]
                 
                 if human_replies:
@@ -714,10 +723,12 @@ def load_forum_context_by_id(db, col_fn, numer_zamowienia, cel, forum_id):
     _flog(f"LOAD_BY_ID: nrzam={numer_zamowienia}, cel={cel}, forum_id={forum_id}")
 
     thread_info = FORUM_THREADS.get(cel)
-    if thread_info and thread_info.get("korzen_id"):
-        result = forum_read_subtree(thread_info["korzen_id"], forum_id, numer_zamowienia)
+    if thread_info and thread_info.get("korzen_id") and thread_info.get("korzen_id") != "DIRECT":
+        result = forum_read_subtree(branch_id=thread_info["korzen_id"], from_post_id=forum_id, nrzam=numer_zamowienia)
     else:
-        result = forum_read(leaf_id=forum_id, max_pages=3)
+        result = forum_read_subtree(branch_id=forum_id, from_post_id=forum_id, nrzam=numer_zamowienia)
+        if not result.get("success"):
+            result = forum_read_subtree(leaf_id=forum_id, root_id=thread_info.get("post_id"), from_post_id=forum_id, nrzam=numer_zamowienia)
 
     context_parts = []
     if result.get("success") and result.get("posts"):
