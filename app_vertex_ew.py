@@ -63,25 +63,34 @@ op_name = st.session_state.operator
 cfg_ref = db.collection(col("operator_configs")).document(op_name)
 cfg = cfg_ref.get().to_dict() or {}
 
-# --- AUTO-SEED (NAPRAWA BŁĘDU 404) ---
-# Wymuszamy, aby w trybie testowym aplikacja patrzyła na nowy plik v4_forum.txt
+# --- AUTO-SEED (NAPRAWA BŁĘDU 404 W WIEŻOWCU) ---
+# Ten blok wymusza poprawne linki w bazie danych, które czyta Wieżowiec
 if TEST_MODE:
+    NEW_TEST_URL = "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz-test/refs/heads/main/v4_forum.txt"
+    
+    # 1. Naprawa konfiguracji Twojego operatora
     cfg = {
         "role": "Operatorzy_FR",
-        "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz-test/refs/heads/main/v4_forum.txt",
+        "prompt_url": NEW_TEST_URL,
         "prompt_name": "v4 forum (EA Edition)",
         "assigned_key_index": 1,
         "tel": False,
     }
     cfg_ref.set(cfg, merge=True)
+    
+    # 2. Naprawa konfiguracji GLOBALNEJ (Wieżowiec często z niej korzysta)
+    global_ref = db.collection(col("admin_config")).document("global_settings")
+    global_ref.set({
+        "prompt_url": NEW_TEST_URL,
+        "prompt_name": "v4 forum (EA Edition)"
+    }, merge=True)
 
 # --- PROJEKT GCP ---
 fixed_key_idx = int(cfg.get("assigned_key_index", 1))
 project_index = fixed_key_idx - 1
 current_gcp_project = GCP_PROJECTS[project_index]
 
-# --- URL PROMPTU (Twarda poprawka błędu 404) ---
-# Jeśli jesteśmy w trybie testowym, ignorujemy to co jest w bazie i wymuszamy poprawny URL
+# --- URL PROMPTU (Twarda poprawka w kodzie) ---
 if TEST_MODE:
     PROMPT_URL = "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz-test/refs/heads/main/v4_forum.txt"
     PROMPT_NAME = "v4 forum (EA Edition)"
@@ -124,7 +133,7 @@ def start_analysis_logic(wsad_text, nrzam_manual=None):
             wsad_text = wsad_text.strip() + "\n\n" + ctx
             st.toast(f"📖 Forum: Załadowano historię dla {nrzam}")
             
-    # Ustawienie PZ startowego (jeśli jest we wsadzie)
+    # Ustawienie PZ startowego
     pz_match = re.search(r'(PZ\d+)', wsad_text, re.I)
     st.session_state.current_start_pz = pz_match.group(1).upper() if pz_match else "PZ0"
     
@@ -143,7 +152,6 @@ with st.sidebar:
 
     st.markdown(f"**📄 Prompt:** `{PROMPT_NAME}`")
     
-    # Standardowy start z Wieżowca
     current_case = st.session_state.get("ew_current_case")
     if current_case and not st.session_state.get("chat_started"):
         if st.button("▶️ Rozpocznij ten case", type="primary"):
@@ -155,7 +163,6 @@ with st.sidebar:
 st.title("🧪 Szturchacz EW TEST (forum)")
 
 if not st.session_state.get("chat_started"):
-    # Pole Ręcznego Wsadu / Wsadu Odwrotnego
     st.subheader("📥 Wklej dane (Wsad Odwrotny / Ręczny)")
     wsad_input = st.text_area("Wklej wiersz lub tabelkę z panelu:", height=300)
     if st.button("🚀 Rozpocznij analizę", type="primary"):
@@ -164,10 +171,8 @@ if not st.session_state.get("chat_started"):
         else:
             st.error("Wsad jest pusty!")
 else:
-    # --- LOGIKA CZATU ---
-    # Pobieranie promptu
     try:
-        # Zawsze pobieramy z PROMPT_URL, który w trybie testowym jest teraz wymuszony na szturchacz-test/v4_forum.txt
+        # Zawsze pobieramy z PROMPT_URL, który w trybie testowym jest teraz wymuszony
         prompt_resp = requests.get(PROMPT_URL)
         prompt_resp.raise_for_status()
         prompt_text = prompt_resp.text
@@ -177,12 +182,10 @@ else:
         
     FULL_PROMPT = prompt_text + f"\n# PARAMETRY STARTOWE\ndomyslny_operator={op_name}\ndomyslna_data={datetime.now().strftime('%d.%m')}"
     
-    # Wyświetlanie historii
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]): 
             st.markdown(msg["content"])
         
-    # Odpowiedź AI
     if st.session_state.messages[-1]["role"] == "user":
         with st.chat_message("model"):
             with st.spinner("Szturchacz analizuje..."):
@@ -192,7 +195,6 @@ else:
                     response = chat.send_message(st.session_state.messages[-1]["content"])
                     ai_text = response.text
                     
-                    # Integracja Forum
                     if FORUM_ENABLED and "[FORUM_" in ai_text:
                         target_nrzam = st.session_state.get("chat_nrzam")
                         fm = load_forum_memory(db, col, target_nrzam) if target_nrzam else {}
