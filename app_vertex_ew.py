@@ -80,10 +80,14 @@ fixed_key_idx = int(cfg.get("assigned_key_index", 1))
 project_index = fixed_key_idx - 1
 current_gcp_project = GCP_PROJECTS[project_index]
 
-# --- URL PROMPTU ---
-# Używamy zaktualizowanego URL z obiektu cfg
-PROMPT_URL = cfg.get("prompt_url", "")
-PROMPT_NAME = cfg.get("prompt_name", "Nieprzypisany")
+# --- URL PROMPTU (Twarda poprawka błędu 404) ---
+# Jeśli jesteśmy w trybie testowym, ignorujemy to co jest w bazie i wymuszamy poprawny URL
+if TEST_MODE:
+    PROMPT_URL = "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz-test/refs/heads/main/v4_forum.txt"
+    PROMPT_NAME = "v4 forum (EA Edition)"
+else:
+    PROMPT_URL = cfg.get("prompt_url", "")
+    PROMPT_NAME = cfg.get("prompt_name", "Nieprzypisany")
 
 if not PROMPT_URL:
     st.error("🚨 Brak przypisanego promptu! Poproś admina.")
@@ -163,11 +167,12 @@ else:
     # --- LOGIKA CZATU ---
     # Pobieranie promptu
     try:
+        # Zawsze pobieramy z PROMPT_URL, który w trybie testowym jest teraz wymuszony na szturchacz-test/v4_forum.txt
         prompt_resp = requests.get(PROMPT_URL)
         prompt_resp.raise_for_status()
         prompt_text = prompt_resp.text
     except Exception as e:
-        st.error(f"🚨 Błąd pobierania promptu: {e}")
+        st.error(f"🚨 Błąd pobierania promptu: {e}\nPróbowałem pobrać z: {PROMPT_URL}")
         st.stop()
         
     FULL_PROMPT = prompt_text + f"\n# PARAMETRY STARTOWE\ndomyslny_operator={op_name}\ndomyslna_data={datetime.now().strftime('%d.%m')}"
