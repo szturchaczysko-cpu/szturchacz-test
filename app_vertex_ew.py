@@ -327,6 +327,8 @@ if "ew_wsad_ready" not in st.session_state:
     st.session_state.ew_wsad_ready = ""          
 if "ew_skipped_ids" not in st.session_state:
     st.session_state.ew_skipped_ids = set()      
+if "chat_nrzam" not in st.session_state:
+    st.session_state.chat_nrzam = None
 
 
 # ==========================================
@@ -379,6 +381,7 @@ with st.sidebar:
         st.session_state.current_start_pz = None
         st.session_state._autopilot_loaded = False
         st.session_state.forum_debug_log = []
+        st.session_state.chat_nrzam = None
         st.rerun()
 
     st.markdown(f"**🔑 Projekt:** `{current_gcp_project}`")
@@ -411,6 +414,7 @@ with st.sidebar:
             st.session_state.ew_wsad_ready = ""
             st.session_state.current_start_pz = None
             st.session_state._autopilot_loaded = False
+            st.session_state.chat_nrzam = None
             st.rerun()
         st.caption("Wieżowiec wyłączony. Wklej wsad w głównym panelu.")
     
@@ -462,13 +466,14 @@ with st.sidebar:
                 elif st.button("▶️ Rozpocznij ten case", type="primary"):
                     wsad = case.get("pelna_linia_szturchacza", "")
                     if wsad:
-                        if FORUM_ENABLED:
-                            nrzam = case.get("numer_zamowienia", "")
-                            if nrzam:
-                                forum_ctx = auto_load_forum_context(db, col, str(nrzam))
-                                if forum_ctx:
-                                    wsad = wsad + "\n\n" + forum_ctx
-                                    st.toast(f"📖 Forum: załadowano kontekst dla {nrzam}")
+                        nrzam = str(case.get("numer_zamowienia", ""))
+                        st.session_state.chat_nrzam = nrzam
+                        
+                        if FORUM_ENABLED and nrzam:
+                            forum_ctx = auto_load_forum_context(db, col, nrzam)
+                            if forum_ctx:
+                                wsad = wsad + "\n\n" + forum_ctx
+                                st.toast(f"📖 Forum: załadowano kontekst dla {nrzam}")
                         
                         if case.get("_doc_id"):
                             db.collection(col("ew_cases")).document(case["_doc_id"]).update({
@@ -522,6 +527,7 @@ with st.sidebar:
                     st.session_state.chat_started = False
                     st.session_state._autopilot_loaded = False
                     st.session_state.current_start_pz = None
+                    st.session_state.chat_nrzam = None
                     st.rerun()
 
             st.markdown("---")
@@ -546,6 +552,7 @@ with st.sidebar:
                     st.session_state.chat_started = False
                     st.session_state.current_start_pz = None
                     st.session_state._autopilot_loaded = False
+                    st.session_state.chat_nrzam = None
                     new_case = ew_get_next_case(operator_grupa, op_name)
                     st.session_state.ew_current_case = new_case
                     st.session_state.ew_wsad_ready = ""
@@ -652,6 +659,7 @@ with st.sidebar:
         st.session_state.chat_started = False
         st.session_state.current_start_pz = None
         st.session_state.ew_wsad_ready = ""
+        st.session_state.chat_nrzam = None
         st.rerun()
 
     if st.button("🚪 Wyloguj"):
@@ -679,6 +687,12 @@ if st.session_state.get("czyste_okno", False) and not st.session_state.get("chat
     czyste_wsad = st.text_area("Wklej wsad:", height=200, key="czyste_wsad_input", placeholder="Wklej tu pełną linię szturchacza...")
     if st.button("🚀 Analizuj", type="primary"):
         if czyste_wsad.strip():
+            nrzam = None
+            _match = re.search(r'^(\d{5,7})', czyste_wsad.strip())
+            if _match:
+                nrzam = _match.group(1)
+            st.session_state.chat_nrzam = nrzam
+            
             st.session_state.forum_debug_log = [] 
             st.session_state.current_start_pz = "PZ_START"
             st.session_state.messages = [{"role": "user", "content": czyste_wsad.strip()}]
@@ -730,19 +744,20 @@ if not st.session_state.chat_started:
             if wsad_input and wsad_input.strip():
                 st.session_state.forum_debug_log = [] 
                 
-                if FORUM_ENABLED:
-                    nrzam = case.get("numer_zamowienia", "")
-                    if not nrzam:
-                        import re as _re
-                        _nrzam_match = _re.match(r'(\d{5,7})', wsad_input.strip())
-                        if _nrzam_match:
-                            nrzam = _nrzam_match.group(1)
-                    
-                    if nrzam:
-                        forum_ctx = auto_load_forum_context(db, col, str(nrzam))
-                        if forum_ctx:
-                            wsad_input = wsad_input + "\n\n" + forum_ctx
-                            st.toast(f"📖 Forum: załadowano kontekst dla {nrzam}")
+                nrzam = case.get("numer_zamowienia", "")
+                if not nrzam:
+                    import re as _re
+                    _nrzam_match = _re.match(r'(\d{5,7})', wsad_input.strip())
+                    if _nrzam_match:
+                        nrzam = _nrzam_match.group(1)
+                
+                st.session_state.chat_nrzam = str(nrzam) if nrzam else None
+                
+                if FORUM_ENABLED and nrzam:
+                    forum_ctx = auto_load_forum_context(db, col, str(nrzam))
+                    if forum_ctx:
+                        wsad_input = wsad_input + "\n\n" + forum_ctx
+                        st.toast(f"📖 Forum: załadowano kontekst dla {nrzam}")
 
                 if case.get("_doc_id"):
                     db.collection(col("ew_cases")).document(case["_doc_id"]).update({
@@ -843,22 +858,19 @@ analizbior={p_analizbior}
                             
                             # --- E2: FORUM INTEGRATION ---
                             if FORUM_ENABLED and ("[FORUM_WRITE|" in ai_text or "[FORUM_READ|" in ai_text):
-                                # Fix: Handle None in ew_current_case
-                                _curr_case = st.session_state.get("ew_current_case") or {}
-                                _nrzam_e2 = str(_curr_case.get("numer_zamowienia", ""))
+                                _nrzam_e2 = st.session_state.get("chat_nrzam")
                                 
-                                # Jeśli brak numeru, szukamy we wsadzie (pierwsza wiadomość od usera)
                                 if not _nrzam_e2 and st.session_state.messages:
                                     import re as _re
                                     _nrzam_match = _re.search(r'(\d{5,7})', st.session_state.messages[0]["content"])
                                     if _nrzam_match:
                                         _nrzam_e2 = _nrzam_match.group(1)
+                                        st.session_state.chat_nrzam = _nrzam_e2
 
                                 _fm_e2 = load_forum_memory(db, col, _nrzam_e2) if _nrzam_e2 else {}
                                 forum_result = execute_forum_actions(ai_text, forum_memory=_fm_e2)
                                 ai_text = forum_result["response"]
                                 
-                                # NAJPIERW zapisz do pamięci (PRZED rerun!)
                                 if forum_result["forum_writes"]:
                                     for fw in forum_result["forum_writes"]:
                                         if fw.get("success"):
@@ -868,7 +880,6 @@ analizbior={p_analizbior}
                                         else:
                                             st.toast(f"❌ Forum: {fw.get('error', '?')}")
                                 
-                                # POTEM rerun jeśli FORUM_READ
                                 if forum_result["forum_reads"]:
                                     forum_context = "\n\n".join(forum_result["forum_reads"])
                                     st.session_state.messages.append({"role": "model", "content": ai_text})
@@ -931,15 +942,18 @@ if not st.session_state.chat_started:
             if wsad_input:
                 st.session_state.forum_debug_log = []
                 
-                if FORUM_ENABLED:
-                    import re as _re
-                    _nrzam_match = _re.match(r'(\d{5,7})', wsad_input.strip())
-                    if _nrzam_match:
-                        _nrzam_clean = _nrzam_match.group(1)
-                        forum_ctx = auto_load_forum_context(db, col, _nrzam_clean)
-                        if forum_ctx:
-                            wsad_input = wsad_input + "\n\n" + forum_ctx
-                            st.toast(f"📖 Forum: kontekst załadowany dla {_nrzam_clean}")
+                _nrzam_clean = None
+                import re as _re
+                _match = _re.match(r'(\d{5,7})', wsad_input.strip())
+                if _match:
+                    _nrzam_clean = _match.group(1)
+                st.session_state.chat_nrzam = _nrzam_clean
+                
+                if FORUM_ENABLED and _nrzam_clean:
+                    forum_ctx = auto_load_forum_context(db, col, _nrzam_clean)
+                    if forum_ctx:
+                        wsad_input = wsad_input + "\n\n" + forum_ctx
+                        st.toast(f"📖 Forum: kontekst załadowany dla {_nrzam_clean}")
                 
                 st.session_state.current_start_pz = parse_pz(wsad_input) or "PZ_START"
                 st.session_state.messages = [{"role": "user", "content": wsad_input}]
