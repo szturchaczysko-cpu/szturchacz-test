@@ -726,12 +726,10 @@ if not st.session_state.chat_started:
             key="ew_reverse_wsad_edit",
         )
         
-        # --- FIX: POPRAWIONY START WSADU ODWROTNEGO Z ODPOWIEDNIM ŁADOWANIEM FORUM ---
         if st.button("🚀 Rozpocznij analizę", type="primary"):
             if wsad_input and wsad_input.strip():
                 st.session_state.forum_debug_log = [] 
                 
-                # LOGIKA ODCZYTU FORUM WSKAKUJE TUTAJ
                 if FORUM_ENABLED:
                     nrzam = case.get("numer_zamowienia", "")
                     if not nrzam:
@@ -845,21 +843,32 @@ analizbior={p_analizbior}
                             
                             # --- E2: FORUM INTEGRATION ---
                             if FORUM_ENABLED and ("[FORUM_WRITE|" in ai_text or "[FORUM_READ|" in ai_text):
-                                _nrzam_e2 = st.session_state.get("ew_current_case", {}).get("numer_zamowienia", "")
+                                # Fix: Handle None in ew_current_case
+                                _curr_case = st.session_state.get("ew_current_case") or {}
+                                _nrzam_e2 = str(_curr_case.get("numer_zamowienia", ""))
+                                
+                                # Jeśli brak numeru, szukamy we wsadzie (pierwsza wiadomość od usera)
+                                if not _nrzam_e2 and st.session_state.messages:
+                                    import re as _re
+                                    _nrzam_match = _re.search(r'(\d{5,7})', st.session_state.messages[0]["content"])
+                                    if _nrzam_match:
+                                        _nrzam_e2 = _nrzam_match.group(1)
+
                                 _fm_e2 = load_forum_memory(db, col, _nrzam_e2) if _nrzam_e2 else {}
                                 forum_result = execute_forum_actions(ai_text, forum_memory=_fm_e2)
                                 ai_text = forum_result["response"]
                                 
+                                # NAJPIERW zapisz do pamięci (PRZED rerun!)
                                 if forum_result["forum_writes"]:
-                                    nrzam = st.session_state.get("ew_current_case", {}).get("numer_zamowienia", "")
                                     for fw in forum_result["forum_writes"]:
                                         if fw.get("success"):
                                             st.toast(f"✅ Forum: post {fw.get('FORUM_ID', '?')} wysłany")
-                                            if nrzam and fw.get("FORUM_ID") and fw.get("cel"):
-                                                save_forum_memory(db, col, nrzam, fw["cel"], fw["FORUM_ID"], fw.get("tresc_skrot", ""))
+                                            if _nrzam_e2 and fw.get("FORUM_ID") and fw.get("cel"):
+                                                save_forum_memory(db, col, _nrzam_e2, fw["cel"], fw.get("FORUM_ID"), fw.get("tresc_skrot", ""))
                                         else:
                                             st.toast(f"❌ Forum: {fw.get('error', '?')}")
                                 
+                                # POTEM rerun jeśli FORUM_READ
                                 if forum_result["forum_reads"]:
                                     forum_context = "\n\n".join(forum_result["forum_reads"])
                                     st.session_state.messages.append({"role": "model", "content": ai_text})
