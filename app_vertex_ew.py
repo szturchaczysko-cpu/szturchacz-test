@@ -688,13 +688,22 @@ if st.session_state.get("czyste_okno", False) and not st.session_state.get("chat
     if st.button("🚀 Analizuj", type="primary"):
         if czyste_wsad.strip():
             nrzam = None
-            _match = re.search(r'^(\d{5,7})', czyste_wsad.strip())
+            import re as _re
+            _match = _re.search(r'(\d{5,7})', czyste_wsad.strip())
             if _match:
                 nrzam = _match.group(1)
             st.session_state.chat_nrzam = nrzam
             
             st.session_state.forum_debug_log = [] 
-            st.session_state.current_start_pz = "PZ_START"
+            
+            # --- POPRAWKA: TWARDY ODCZYT FORUM WE WSADZIE RĘCZNYM ---
+            if FORUM_ENABLED and nrzam:
+                forum_ctx = auto_load_forum_context(db, col, str(nrzam))
+                if forum_ctx:
+                    czyste_wsad = czyste_wsad.strip() + "\n\n" + forum_ctx
+                    st.toast(f"📖 Forum: kontekst załadowany dla {nrzam}")
+
+            st.session_state.current_start_pz = parse_pz(czyste_wsad) or "PZ_START"
             st.session_state.messages = [{"role": "user", "content": czyste_wsad.strip()}]
             st.session_state.chat_started = True
             st.session_state.ew_wsad_ready = ""
@@ -944,7 +953,7 @@ if not st.session_state.chat_started:
                 
                 _nrzam_clean = None
                 import re as _re
-                _match = _re.match(r'(\d{5,7})', wsad_input.strip())
+                _match = _re.search(r'(\d{5,7})', wsad_input.strip())
                 if _match:
                     _nrzam_clean = _match.group(1)
                 st.session_state.chat_nrzam = _nrzam_clean
