@@ -418,7 +418,7 @@ USE_NEW_SUBTHREADS = True
 _FORUM_THREADS_PROD = {
     "AUTOS_KURIERZY": {
         "post_id": 5443, "korzen_id": None,
-        "grupa": "TEAM_ATOMOWKI", "grupa_type": 2,
+        "grupa": "Team_Atomowki", "grupa_type": 2,
         "opis": "Zlecenie kuriera/etykiety/atomówki (§11.4)",
     },
     "SPEDYCJA_REKLAMACJE": {
@@ -428,7 +428,7 @@ _FORUM_THREADS_PROD = {
     },
     "CZATOSZTUR_REKLAMACJE": {
         "post_id": 5616, "korzen_id": None,
-        "grupa": "DZIAŁ_EKSPERCKI", "grupa_type": 2,
+        "grupa": "Dział_ekspercki", "grupa_type": 2,
         "opis": "Reklamacja 'co dalej / można szturchać' (§5.3)",
     },
     "NIEPOZAMYKANE_AUSTAUSCHE": {
@@ -456,38 +456,38 @@ _FORUM_THREADS_PROD = {
 _FORUM_THREADS_TEST = {
     "AUTOS_KURIERZY": {
         "post_id": 5443, "korzen_id": "DIRECT",
-        "grupa": "TEAM_ATOMOWKI", "grupa_type": 2,
-        "opis": "Zlecenie kuriera/etykiety/atomówki (§11.4)",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Zlecenie kuriera/etykiety/atomówki",
     },
     "SPEDYCJA_REKLAMACJE": {
         "post_id": 5615, "korzen_id": "DIRECT",
-        "grupa": "SPEDYCJA_REKLAMACJE", "grupa_type": 2,
-        "opis": "Problemy po zleceniu kuriera (§10.4)",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Problemy po zleceniu kuriera",
     },
     "CZATOSZTUR_REKLAMACJE": {
         "post_id": 5616, "korzen_id": "DIRECT",
-        "grupa": "DZIAŁ_EKSPERCKI", "grupa_type": 2,
-        "opis": "Reklamacja 'co dalej / można szturchać' (§5.3)",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Reklamacja",
     },
     "NIEPOZAMYKANE_AUSTAUSCHE": {
         "post_id": 3730, "korzen_id": "DIRECT",
-        "grupa": "Niepozamykane_Austausche", "grupa_type": 2,
-        "opis": "Niezamknięte Austausche / zielonka (§10.5)",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Niezamknięte Austausche",
     },
     "CZATOSZTUR_DE": {
         "post_id": 5617, "korzen_id": "DIRECT",
-        "grupa": "Operatorzy_DE", "grupa_type": 2,
-        "opis": "Czatosztur DE — delegacje TEL, zapytania (§8.3)",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Czatosztur DE",
     },
     "CZATOSZTUR_FR": {
         "post_id": 5618, "korzen_id": "DIRECT",
-        "grupa": "Operatorzy_FR", "grupa_type": 2,
-        "opis": "Czatosztur FR (§8.3)",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Czatosztur FR",
     },
     "CZATOSZTUR_UKPL": {
         "post_id": 5619, "korzen_id": "DIRECT",
-        "grupa": "Operatorzy_UK/PL", "grupa_type": 2,
-        "opis": "Czatosztur UK/PL (§8.3)",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Czatosztur UKPL",
     },
 }
 
