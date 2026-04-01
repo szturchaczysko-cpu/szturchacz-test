@@ -457,37 +457,47 @@ _FORUM_THREADS_TEST = {
     "AUTOS_KURIERZY": {
         "post_id": 5443, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
-        "opis": "Zlecenie kuriera/etykiety/atomówki (§11.4)",
+        "opis": "Zlecenie kuriera/etykiety/atomówki",
     },
     "SPEDYCJA_REKLAMACJE": {
         "post_id": 5615, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
-        "opis": "Problemy po zleceniu kuriera (§10.4)",
+        "opis": "Problemy po zleceniu kuriera",
     },
     "CZATOSZTUR_REKLAMACJE": {
         "post_id": 5616, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
-        "opis": "Reklamacja 'co dalej / można szturchać' (§5.3)",
+        "opis": "Reklamacja",
     },
     "NIEPOZAMYKANE_AUSTAUSCHE": {
         "post_id": 3730, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
-        "opis": "Niezamknięte Austausche / zielonka (§10.5)",
+        "opis": "Niezamknięte Austausche",
     },
     "CZATOSZTUR_DE": {
         "post_id": 5617, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
-        "opis": "Czatosztur DE — delegacje TEL, zapytania (§8.3)",
+        "opis": "Czatosztur DE",
     },
     "CZATOSZTUR_FR": {
         "post_id": 5618, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
-        "opis": "Czatosztur FR (§8.3)",
+        "opis": "Czatosztur FR",
     },
     "CZATOSZTUR_UKPL": {
         "post_id": 5619, "korzen_id": "DIRECT",
         "grupa": "Sylwia", "grupa_type": 1,
-        "opis": "Czatosztur UK/PL (§8.3)",
+        "opis": "Czatosztur UKPL",
+    },
+    "KURIER_test": {
+        "post_id": 5443, "korzen_id": "DIRECT",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Alias → AUTOS_KURIERZY (5443)",
+    },
+    "REKLA_test": {
+        "post_id": 5616, "korzen_id": "DIRECT",
+        "grupa": "Sylwia", "grupa_type": 1,
+        "opis": "Alias → CZATOSZTUR_REKLAMACJE (5616)",
     },
 }
 
@@ -523,7 +533,7 @@ def get_thread_info(cel):
     info = FORUM_THREADS.get(cel)
     if not info:
         return None
-    if info.get("korzen_id") is None:
+    if info.get("korzen_id") is None and cel not in ["KURIER_test", "REKLA_test"]:
         discover_roots()
     return info
 
