@@ -13,7 +13,7 @@ from streamlit_cookies_manager import EncryptedCookieManager
 
 # --- MODUŁ FORUM ---
 try:
-    from forum_module import execute_forum_actions, discover_roots, auto_load_forum_context, save_forum_memory
+    from forum_module import execute_forum_actions, discover_roots, auto_load_forum_context, save_forum_memory, load_forum_memory
     FORUM_ENABLED = True
 except ImportError:
     FORUM_ENABLED = False
@@ -69,7 +69,7 @@ cfg = cfg_ref.get().to_dict() or {}
 if TEST_MODE:
     cfg = {
         "role": "Operatorzy_FR",
-        "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz/refs/heads/main/v4_forum.txt",
+        "prompt_url": "https://raw.githubusercontent.com/szturchaczysko-cpu/szturchacz-test/refs/heads/main/v4_forum.txt",
         "prompt_name": "v4 forum",
         "assigned_key_index": 1,
         "tel": False,
@@ -153,16 +153,9 @@ OPERATORS_TEL = {
 }
 
 def ew_get_next_case(grupa, op_name):
-    """Pobiera najwyższy wolny case z grupy wg priorytetów:
-    1. Moje przeliczone (autopilot_assigned_to == ja)
-    2. Cudze przeliczone, pełna zgodność TEL (TEL→TEL, nieTEL→nieTEL)
-    3. Nieprzeliczone z mojej grupy
-    4. Cudze przeliczone, jednostronna zgodność (TEL może wziąć nieTEL, ale nie odwrotnie)
-    """
     skipped_ids = st.session_state.get("ew_skipped_ids", set())
     my_tel = OPERATORS_TEL.get(op_name, False)
     
-    # Pobierz wszystkie wolne z mojej grupy (jedno query, filtrowanie po stronie klienta)
     try:
         q = (db.collection(col("ew_cases"))
              .where("grupa", "==", grupa)
@@ -177,11 +170,10 @@ def ew_get_next_case(grupa, op_name):
     if not all_free:
         return None
     
-    # Rozdziel na kategorie
-    prio1 = []  # moje przeliczone
-    prio2 = []  # cudze przeliczone, pełna zgodność TEL
-    prio3 = []  # nieprzeliczone
-    prio4 = []  # cudze przeliczone, jednostronna (tylko dla TEL operatorów)
+    prio1 = []  
+    prio2 = []  
+    prio3 = []  
+    prio4 = []  
     
     for d in all_free:
         data = d.to_dict()
@@ -191,30 +183,23 @@ def ew_get_next_case(grupa, op_name):
         if is_calculated and assigned_op == op_name:
             prio1.append(d)
         elif is_calculated and assigned_op:
-            # Cudzy przeliczony — sprawdź zgodność TEL
             other_tel = OPERATORS_TEL.get(assigned_op, False)
             if other_tel == my_tel:
-                # Pełna zgodność: TEL→TEL lub nieTEL→nieTEL
                 prio2.append(d)
             elif my_tel and not other_tel:
-                # Jednostronna: ja TEL, case od nieTEL — mogę wziąć
                 prio4.append(d)
-            # else: ja nieTEL, case od TEL — NIE MOGĘ wziąć
         else:
-            # Nieprzeliczony
             prio3.append(d)
     
-    # Wybierz wg priorytetów
     doc = None
     for candidates in [prio1, prio2, prio3, prio4]:
         if candidates:
-            doc = candidates[0]  # najwyższy score (już posortowane)
+            doc = candidates[0] 
             break
     
     if not doc:
         return None
     
-    # Zarezerwuj atomowo
     db.collection(col("ew_cases")).document(doc.id).update({
         "status": "przydzielony",
         "assigned_to": op_name,
@@ -225,7 +210,6 @@ def ew_get_next_case(grupa, op_name):
     return data
 
 def ew_restore_active_case(grupa, op_name):
-    """Sprawdź czy operator ma aktywny case (przydzielony/w_toku) — odporność na odświeżenie strony."""
     try:
         q = (db.collection(col("ew_cases"))
              .where("assigned_to", "==", op_name)
@@ -241,14 +225,12 @@ def ew_restore_active_case(grupa, op_name):
     return None
 
 def ew_complete_case(case_doc_id, result_tag=None, result_pz=None):
-    """Oznacz case jako zakończony"""
     upd = {"status": "zakonczony", "completed_at": firestore.SERVER_TIMESTAMP}
     if result_tag: upd["result_tag"] = result_tag
     if result_pz: upd["result_pz"] = result_pz
     db.collection(col("ew_cases")).document(case_doc_id).update(upd)
 
 def ew_release_case(case_doc_id):
-    """Oddaj case z powrotem do puli"""
     db.collection(col("ew_cases")).document(case_doc_id).update({
         "status": "wolny",
         "assigned_to": None,
@@ -256,14 +238,12 @@ def ew_release_case(case_doc_id):
     })
 
 def ew_count_available(grupa):
-    """Policz wolne casy w grupie"""
     return len(db.collection(col("ew_cases"))
                .where("grupa", "==", grupa)
                .where("status", "==", "wolny")
                .limit(500).get())
 
 def ew_log_completion(op_name):
-    """Loguj zakończenie casa do statystyk Wieżowca"""
     tz_pl = pytz.timezone('Europe/Warsaw')
     today = datetime.now(tz_pl).strftime("%Y-%m-%d")
     time_str = datetime.now(tz_pl).strftime("%H:%M")
@@ -272,33 +252,41 @@ def ew_log_completion(op_name):
         "completion_times": firestore.ArrayUnion([time_str]),
     }, merge=True)
 
+def ew_log_taken(op_name):
+    tz_pl = pytz.timezone('Europe/Warsaw')
+    today = datetime.now(tz_pl).strftime("%Y-%m-%d")
+    db.collection(col("ew_operator_stats")).document(today).collection("operators").document(op_name).set({
+        "cases_taken": firestore.Increment(1),
+    }, merge=True)
+
+def ew_log_skipped(op_name):
+    tz_pl = pytz.timezone('Europe/Warsaw')
+    today = datetime.now(tz_pl).strftime("%Y-%m-%d")
+    db.collection(col("ew_operator_stats")).document(today).collection("operators").document(op_name).set({
+        "cases_skipped": firestore.Increment(1),
+    }, merge=True)
+
 def detect_tag_in_response(text):
-    """Wykryj tag C# lub TAG-KOPERTA w odpowiedzi AI"""
-    # TAG-KOPERTA — luźny regex: C#:DD.MM;PZ=coś;DRABES=coś (lub DRABE=)
     m = re.search(r'(C#:\d{2}\.\d{2};PZ=\S+?;DRABE[S]?=\S+)', text)
     if m:
         tag = m.group(1)
         pz_m = re.search(r'PZ=(\S+?)(?:[;\s]|$)', tag)
         return tag, pz_m.group(1) if pz_m else None
-    # Jeszcze luźniej: C#:DD.MM;PZ=coś (minimum)
     m = re.search(r'(C#:\d{2}\.\d{2};PZ=\S+)', text)
     if m:
         tag = m.group(1)
         pz_m = re.search(r'PZ=(\S+?)(?:[;\s]|$)', tag)
         return tag, pz_m.group(1) if pz_m else None
-    # Zwykły C# (stary format)
     m = re.search(r'(C#:\d{2}\.\d{2}_\S+_\d{2}\.\d{2})', text)
     if m:
         return m.group(1), parse_pz(text)
     return None, None
 
 def ew_find_case_by_nrzam(nrzam, op_name):
-    """Szuka case'a po NrZam w bazie ew_cases. Rezerwuje jeśli wolny."""
     results = db.collection(col("ew_cases")).where("numer_zamowienia", "==", nrzam).limit(5).get()
     if not results:
         return None, "not_found"
     
-    # Znajdź najlepszy case (priorytet: wolny > przydzielony do mnie > inne)
     best = None
     best_status = None
     for doc in results:
@@ -307,7 +295,6 @@ def ew_find_case_by_nrzam(nrzam, op_name):
         status = data.get("status", "wolny")
         
         if status == "wolny":
-            # Zarezerwuj atomowo
             db.collection(col("ew_cases")).document(doc.id).update({
                 "status": "przydzielony",
                 "assigned_to": op_name,
@@ -315,7 +302,6 @@ def ew_find_case_by_nrzam(nrzam, op_name):
             })
             return data, "reserved"
         elif status in ("przydzielony", "w_toku") and data.get("assigned_to") == op_name:
-            # Już przydzielony do mnie
             return data, "already_mine"
         elif status in ("przydzielony", "w_toku"):
             best = data
@@ -332,16 +318,17 @@ def ew_find_case_by_nrzam(nrzam, op_name):
 # INICJALIZACJA STANÓW EW
 # ==========================================
 if "ew_current_case" not in st.session_state:
-    # Nowa sesja — sprawdź czy operator ma aktywny case w Firestore
     restored = ew_restore_active_case(operator_grupa, op_name)
     if restored:
         st.session_state.ew_current_case = restored
     else:
         st.session_state.ew_current_case = None
 if "ew_wsad_ready" not in st.session_state:
-    st.session_state.ew_wsad_ready = ""          # Wsad gotowy do wklejenia w pole
+    st.session_state.ew_wsad_ready = ""          
 if "ew_skipped_ids" not in st.session_state:
-    st.session_state.ew_skipped_ids = set()      # Pominięte casy (żeby nie wracały)
+    st.session_state.ew_skipped_ids = set()      
+if "chat_nrzam" not in st.session_state:
+    st.session_state.chat_nrzam = None
 
 
 # ==========================================
@@ -352,37 +339,27 @@ show_diamonds = global_cfg.get("show_diamonds", True)
 caching_enabled = global_cfg.get("context_caching_enabled", False)
 
 
-# --- CONTEXT CACHING HELPER ---
 def get_or_create_cached_model(model_id, system_prompt):
-    """
-    Tworzy lub pobiera cache'owany model z Vertex AI Context Caching.
-    Cache żyje 60 min (TTL). Klucz: hash(model_id + prompt).
-    Zwraca GenerativeModel z from_cached_content lub None jeśli błąd.
-    """
     import hashlib
     from datetime import timedelta as td
     
     cache_key = hashlib.md5(f"{model_id}:{system_prompt[:500]}".encode()).hexdigest()[:12]
     session_key = f"vertex_cache_{cache_key}"
     
-    # Sprawdź czy mamy aktywny cache w sesji
     cached_name = st.session_state.get(session_key)
     if cached_name:
         try:
             cached_content = vertex_caching.CachedContent(cached_content_name=cached_name)
-            # Sprawdź czy cache nie wygasł
             model = GenerativeModel.from_cached_content(cached_content=cached_content)
             return model
         except Exception:
-            # Cache wygasł lub nie istnieje — tworzymy nowy
             st.session_state.pop(session_key, None)
     
-    # Twórz nowy cache
     try:
         cached_content = vertex_caching.CachedContent.create(
             model_name=model_id,
             system_instruction=system_prompt,
-            contents=[],  # pusty — cachujemy tylko system prompt
+            contents=[],  
             ttl=td(minutes=60),
             display_name=f"ew-{cache_key}",
         )
@@ -390,12 +367,22 @@ def get_or_create_cached_model(model_id, system_prompt):
         model = GenerativeModel.from_cached_content(cached_content=cached_content)
         return model
     except Exception as e:
-        # Fallback — zwykły model bez cache
         st.toast(f"⚠️ Cache niedostępny: {str(e)[:100]}. Tryb normalny.")
         return None
 
 with st.sidebar:
     st.title(f"👤 {op_name}")
+    
+    if st.button("🧹 Reset (czysty start)"):
+        st.session_state.ew_current_case = None
+        st.session_state.ew_wsad_ready = ""
+        st.session_state.messages = []
+        st.session_state.chat_started = False
+        st.session_state.current_start_pz = None
+        st.session_state._autopilot_loaded = False
+        st.session_state.forum_debug_log = []
+        st.session_state.chat_nrzam = None
+        st.rerun()
 
     st.markdown(f"**🔑 Projekt:** `{current_gcp_project}`")
     st.markdown(f"**📄 Prompt:** `{PROMPT_NAME}`")
@@ -411,230 +398,217 @@ with st.sidebar:
         st.markdown(f"### 💎 Zamówieni kurierzy\n**Dziś:** {today_diamonds} | **Łącznie:** {all_time_diamonds}")
         st.markdown("---")
 
-    # ==========================================
-    # 🎯 TRYB STARTOWY (przed Wieżowcem — bo Wieżowiec go potrzebuje)
-    # ==========================================
     st.markdown("---")
     TRYBY_DICT = {"Standard": "od_szturchacza", "WA": "WA", "MAIL": "MAIL", "FORUM": "FORUM"}
     st.selectbox("Tryb Startowy:", list(TRYBY_DICT.keys()), key="tryb_label")
     wybrany_tryb_kod = TRYBY_DICT[st.session_state.tryb_label]
-
-    # ==========================================
-    # 🏢 SEKCJA WIEŻOWIEC W SIDEBARZE (NOWE!)
-    # ==========================================
-    st.subheader(f"🏢 Wieżowiec ({operator_grupa})")
-    avail = ew_count_available(operator_grupa)
-    st.caption(f"Wolne casy: **{avail}**")
-
-    # Statystyki EW dzisiaj
-    ew_today = db.collection(col("ew_operator_stats")).document(
-        datetime.now(pytz.timezone('Europe/Warsaw')).strftime("%Y-%m-%d")
-    ).collection("operators").document(op_name).get().to_dict() or {}
-    st.caption(f"🏢 Zakończone dziś: **{ew_today.get('cases_completed', 0)}**")
-
-    # Info o autopilocie
-    autopilot_on = cfg.get("autopilot_enabled", False)
-    if wybrany_tryb_kod in ("WA", "MAIL", "FORUM"):
-        st.caption(f"🤖 Autopilot: **OFF** (tryb {wybrany_tryb_kod})")
-    elif autopilot_on:
-        st.caption("🤖 Autopilot: **ON** — nocne przeliczenia będą ładowane")
-    else:
-        st.caption("🤖 Autopilot: **OFF** — każdy case od zera")
-
-    # Aktualny case — ale ukryj jeśli tryb odwrotny i case nie jest odwrotny
-    current_case = st.session_state.ew_current_case
-    show_current_case = current_case and (
-        wybrany_tryb_kod == "od_szturchacza"  # tryb standard → zawsze pokazuj
-        or current_case.get("_reverse_mode", False)  # case już jest odwrotny → pokazuj
-    )
     
-    # Jeśli tryb odwrotny a mamy case standardowy → zwolnij go
-    if current_case and wybrany_tryb_kod in ("WA", "MAIL", "FORUM") and not current_case.get("_reverse_mode", False):
-        # Nie zwolnij od razu — pokaż info
-        st.caption(f"ℹ️ Case {current_case.get('numer_zamowienia', '?')} czeka (tryb Standard). Przełącz na Standard by kontynuować.")
+    st.markdown("---")
+    czyste_okno = st.checkbox("🧪 Czyste okno (wklej wsad ręcznie)", value=False, key="czyste_okno")
+    if czyste_okno:
+        if st.button("🗑️ Wyczyść debug log + chat"):
+            st.session_state.forum_debug_log = []
+            st.session_state.messages = []
+            st.session_state.chat_started = False
+            st.session_state.ew_current_case = None
+            st.session_state.ew_wsad_ready = ""
+            st.session_state.current_start_pz = None
+            st.session_state._autopilot_loaded = False
+            st.session_state.chat_nrzam = None
+            st.rerun()
+        st.caption("Wieżowiec wyłączony. Wklej wsad w głównym panelu.")
     
-    if show_current_case:
-        case = st.session_state.ew_current_case
-        is_reverse = case.get("_reverse_mode", False)
-        reverse_label = f" 📨 {case.get('_reverse_type', '')}" if is_reverse else ""
-        autopilot_label = " 🤖" if case.get("autopilot_status") == "calculated" else ""
-        st.info(f"📌 Case: **{case.get('numer_zamowienia', '?')}**{reverse_label}{autopilot_label}\n"
-                f"{case.get('priority_icon', '')} [{case.get('score', 0)}]")
-        if case.get("autopilot_status") == "calculated":
-            if is_reverse:
-                st.caption(f"🤖 Przeliczone nocą, ale tryb **{case.get('_reverse_type', '')}** → start od zera (nowa instancja kanałowa)")
-            elif cfg.get("autopilot_enabled", False):
-                st.caption("🤖 Pierwszy ruch przeliczony — kliknij ▶️ by załadować gotową analizę")
-            else:
-                st.caption("🤖 Przeliczone nocą (autopilot OFF — będzie liczone od zera)")
+    if not czyste_okno:
+        st.subheader(f"🏢 Wieżowiec ({operator_grupa})")
+        avail = ew_count_available(operator_grupa)
+        st.caption(f"Wolne casy: **{avail}**")
 
-        # Przycisk: ROZPOCZNIJ CASE (tylko gdy chat nie jest uruchomiony)
-        # Dla trybu odwrotnego — start jest w głównym panelu (tam jest text_area do edycji)
-        if not st.session_state.get("chat_started"):
-            if is_reverse:
-                st.caption("📨 Edytuj wsad i kliknij **🚀 Rozpocznij analizę** w głównym panelu →")
-            elif st.button("▶️ Rozpocznij ten case", type="primary"):
-                wsad = case.get("pelna_linia_szturchacza", "")
-                if wsad:
-                    # --- FORUM: auto-odczyt pamięci forumowej ---
-                    if FORUM_ENABLED:
-                        nrzam = case.get("numer_zamowienia", "")
-                        if nrzam:
+        ew_today = db.collection(col("ew_operator_stats")).document(
+            datetime.now(pytz.timezone('Europe/Warsaw')).strftime("%Y-%m-%d")
+        ).collection("operators").document(op_name).get().to_dict() or {}
+        st.caption(f"🏢 Zakończone dziś: **{ew_today.get('cases_completed', 0)}**")
+
+        autopilot_on = cfg.get("autopilot_enabled", False)
+        if wybrany_tryb_kod in ("WA", "MAIL", "FORUM"):
+            st.caption(f"🤖 Autopilot: **OFF** (tryb {wybrany_tryb_kod})")
+        elif autopilot_on:
+            st.caption("🤖 Autopilot: **ON** — nocne przeliczenia będą ładowane")
+        else:
+            st.caption("🤖 Autopilot: **OFF** — każdy case od zera")
+
+        current_case = st.session_state.ew_current_case
+        show_current_case = current_case and (
+            wybrany_tryb_kod == "od_szturchacza"  
+            or current_case.get("_reverse_mode", False)  
+        )
+        
+        if current_case and wybrany_tryb_kod in ("WA", "MAIL", "FORUM") and not current_case.get("_reverse_mode", False):
+            st.caption(f"ℹ️ Case {current_case.get('numer_zamowienia', '?')} czeka (tryb Standard). Przełącz na Standard by kontynuować.")
+        
+        if show_current_case:
+            case = st.session_state.ew_current_case
+            is_reverse = case.get("_reverse_mode", False)
+            reverse_label = f" 📨 {case.get('_reverse_type', '')}" if is_reverse else ""
+            autopilot_label = " 🤖" if case.get("autopilot_status") == "calculated" else ""
+            st.info(f"📌 Case: **{case.get('numer_zamowienia', '?')}**{reverse_label}{autopilot_label}\n"
+                    f"{case.get('priority_icon', '')} [{case.get('score', 0)}]")
+            if case.get("autopilot_status") == "calculated":
+                if is_reverse:
+                    st.caption(f"🤖 Przeliczone nocą, ale tryb **{case.get('_reverse_type', '')}** → start od zera (nowa instancja kanałowa)")
+                elif cfg.get("autopilot_enabled", False):
+                    st.caption("🤖 Pierwszy ruch przeliczony — kliknij ▶️ by załadować gotową analizę")
+                else:
+                    st.caption("🤖 Przeliczone nocą (autopilot OFF — będzie liczone od zera)")
+
+            if not st.session_state.get("chat_started"):
+                if is_reverse:
+                    st.caption("📨 Edytuj wsad i kliknij **🚀 Rozpocznij analizę** w głównym panelu →")
+                elif st.button("▶️ Rozpocznij ten case", type="primary"):
+                    wsad = case.get("pelna_linia_szturchacza", "")
+                    if wsad:
+                        nrzam = str(case.get("numer_zamowienia", ""))
+                        st.session_state.chat_nrzam = nrzam
+                        
+                        if FORUM_ENABLED and nrzam:
                             forum_ctx = auto_load_forum_context(db, col, nrzam)
                             if forum_ctx:
                                 wsad = wsad + "\n\n" + forum_ctx
                                 st.toast(f"📖 Forum: załadowano kontekst dla {nrzam}")
-                    # --- KONIEC FORUM ---
-                    # Oznacz jako w_toku
+                        
+                        if case.get("_doc_id"):
+                            db.collection(col("ew_cases")).document(case["_doc_id"]).update({
+                                "status": "w_toku",
+                                "started_at": firestore.SERVER_TIMESTAMP,
+                            })
+
+                        autopilot_msgs = case.get("autopilot_messages")
+                        operator_autopilot_on = cfg.get("autopilot_enabled", False)
+                        if (operator_autopilot_on
+                                and not is_reverse  
+                                and case.get("autopilot_status") == "calculated"
+                                and autopilot_msgs and len(autopilot_msgs) >= 2):
+                            st.session_state.current_start_pz = parse_pz(wsad) or "PZ_START"
+                            st.session_state.messages = autopilot_msgs  
+                            st.session_state.chat_started = True
+                            st.session_state.ew_wsad_ready = ""
+                            st.session_state._autopilot_loaded = True
+                        else:
+                            st.session_state.current_start_pz = parse_pz(wsad) or "PZ_START"
+                            st.session_state.messages = [{"role": "user", "content": wsad}]
+                            st.session_state.chat_started = True
+                            st.session_state.ew_wsad_ready = ""
+                            st.session_state._autopilot_loaded = False
+
+                        if is_reverse:
+                            st.session_state.ew_forced_tryb = case.get("_reverse_type", "WA")
+                        st.rerun()
+                    else:
+                        st.error("Case nie ma wsadu!")
+
+            st.markdown("---")
+            skip_reason = st.text_area("💬 Powód pominięcia:", key="ew_skip_reason", max_chars=500, height=80, placeholder="np. brak danych, czekam na forum, klient nie odbiera...")
+            if st.button("⏭️ Pomiń case"):
+                if not skip_reason or not skip_reason.strip():
+                    st.error("⚠️ Wpisz powód pominięcia — nie można pominąć bez komentarza!")
+                else:
                     if case.get("_doc_id"):
                         db.collection(col("ew_cases")).document(case["_doc_id"]).update({
-                            "status": "w_toku",
-                            "started_at": firestore.SERVER_TIMESTAMP,
+                            "status": "pominiety",
+                            "assigned_to": None,
+                            "assigned_at": None,
+                            "skip_reason": skip_reason.strip(),
+                            "skipped_by": op_name,
+                            "skipped_at": firestore.SERVER_TIMESTAMP,
                         })
-
-                    # AUTOPILOT: jeśli case ma przeliczony pierwszy ruch I operator ma włączony autopilot → załaduj gotową historię
-                    # ALE: jeśli tryb odwrotny (WA/MAIL/FORUM) → NIE ładuj autopilota, bo nocne przeliczenie
-                    # było w trybie standardowym i nie pasuje do ROLKA_START_* (§ analiza kanałowa)
-                    autopilot_msgs = case.get("autopilot_messages")
-                    operator_autopilot_on = cfg.get("autopilot_enabled", False)
-                    if (operator_autopilot_on
-                            and not is_reverse  # ← NIE ładuj autopilota w trybie odwrotnym
-                            and case.get("autopilot_status") == "calculated"
-                            and autopilot_msgs and len(autopilot_msgs) >= 2):
-                        st.session_state.current_start_pz = parse_pz(wsad) or "PZ_START"
-                        st.session_state.messages = autopilot_msgs  # gotowa historia: [user: wsad, model: odpowiedź AI]
-                        st.session_state.chat_started = True
-                        st.session_state.ew_wsad_ready = ""
-                        st.session_state._autopilot_loaded = True
-                    else:
-                        # Normalny start — od zera (autopilot OFF lub brak przeliczenia)
-                        st.session_state.current_start_pz = parse_pz(wsad) or "PZ_START"
-                        st.session_state.messages = [{"role": "user", "content": wsad}]
-                        st.session_state.chat_started = True
-                        st.session_state.ew_wsad_ready = ""
-                        st.session_state._autopilot_loaded = False
-
-                    # Jeśli wsad odwrotny — zapamiętaj tryb
-                    if is_reverse:
-                        st.session_state.ew_forced_tryb = case.get("_reverse_type", "WA")
+                        ew_log_skipped(op_name)
+                    st.session_state.ew_current_case = None
+                    st.session_state.ew_wsad_ready = ""
+                    st.session_state.messages = []
+                    st.session_state.chat_started = False
+                    st.session_state._autopilot_loaded = False
+                    st.session_state.current_start_pz = None
+                    st.session_state.chat_nrzam = None
                     st.rerun()
+
+            st.markdown("---")
+            if st.button("✅ Zakończ → Następny"):
+                tag, pz = None, None
+                msgs = st.session_state.get("messages", [])
+                for m in reversed(msgs):
+                    if m.get("role") == "model":
+                        tag, pz = detect_tag_in_response(m.get("content", ""))
+                        if tag:
+                            break
+                
+                if tag:
+                    if case.get("_doc_id"):
+                        ew_complete_case(case["_doc_id"], result_tag=tag, result_pz=pz)
+                    start_pz = st.session_state.get("current_start_pz", None)
+                    end_pz = pz  
+                    proj_idx = st.session_state.get("current_project_idx", 0)
+                    log_stats(op_name, start_pz, end_pz, proj_idx)
+                    ew_log_completion(op_name)
+                    st.session_state.messages = []
+                    st.session_state.chat_started = False
+                    st.session_state.current_start_pz = None
+                    st.session_state._autopilot_loaded = False
+                    st.session_state.chat_nrzam = None
+                    new_case = ew_get_next_case(operator_grupa, op_name)
+                    st.session_state.ew_current_case = new_case
+                    st.session_state.ew_wsad_ready = ""
+                    if new_case:
+                        ew_log_taken(op_name)
+                        st.rerun()
+                    else:
+                        st.success("✅ Case zakończony! Brak kolejnych casów w puli.")
+                        st.rerun()
                 else:
-                    st.error("Case nie ma wsadu!")
+                    st.error("❌ Brak TAGu w odpowiedzi AI — nie można zakończyć. Kontynuuj rozmowę z AI.")
 
-        # Przycisk: Pomiń (z powodem)
-        st.markdown("---")
-        skip_reason = st.text_area("💬 Powód pominięcia:", key="ew_skip_reason", max_chars=500, height=80, placeholder="np. brak danych, czekam na forum, klient nie odbiera...")
-        if st.button("⏭️ Pomiń case"):
-            if not skip_reason or not skip_reason.strip():
-                st.error("⚠️ Wpisz powód pominięcia — nie można pominąć bez komentarza!")
-            else:
-                if case.get("_doc_id"):
-                    # Status "pominiety" — nikt go nie dostanie, wraca dopiero po "Naprawione"
-                    db.collection(col("ew_cases")).document(case["_doc_id"]).update({
-                        "status": "pominiety",
-                        "assigned_to": None,
-                        "assigned_at": None,
-                        "skip_reason": skip_reason.strip(),
-                        "skipped_by": op_name,
-                        "skipped_at": firestore.SERVER_TIMESTAMP,
-                    })
-                    # Reset stanu na nowy case
-                st.session_state.ew_current_case = None
-                st.session_state.ew_wsad_ready = ""
-                st.session_state.messages = []
-                st.session_state.chat_started = False
-                st.session_state._autopilot_loaded = False
-                st.session_state.current_start_pz = None
-                st.rerun()
-
-        # Przycisk: Zakończ case → od razu pobierz następny
-        # Zawsze widoczny — walidacja TAG przy kliknięciu
-        st.markdown("---")
-        if st.button("✅ Zakończ → Następny"):
-            # Szukaj TAGu we WSZYSTKICH odpowiedziach modelu
-            tag, pz = None, None
-            msgs = st.session_state.get("messages", [])
-            for m in reversed(msgs):
-                if m.get("role") == "model":
-                    tag, pz = detect_tag_in_response(m.get("content", ""))
-                    if tag:
-                        break
+        if not show_current_case:
+            if wybrany_tryb_kod in ("WA", "MAIL", "FORUM"):
+                st.markdown(f"📨 **Wsad odwrotny: {wybrany_tryb_kod}**")
+                nrzam_input = st.text_input("Podaj NrZam:", key="ew_reverse_nrzam", placeholder="np. 369771")
+                
+                if st.button(f"🔍 Szukaj case'a ({wybrany_tryb_kod})", type="primary"):
+                    if nrzam_input.strip():
+                        case_data, status = ew_find_case_by_nrzam(nrzam_input.strip(), op_name)
+                        
+                        if status == "reserved":
+                            case_data["_reverse_mode"] = True
+                            case_data["_reverse_type"] = wybrany_tryb_kod
+                            st.session_state.ew_current_case = case_data
+                            st.success(f"✅ Znaleziono case **{nrzam_input}** — zarezerwowany!")
+                            st.rerun()
+                        elif status == "already_mine":
+                            case_data["_reverse_mode"] = True
+                            case_data["_reverse_type"] = wybrany_tryb_kod
+                            st.session_state.ew_current_case = case_data
+                            st.info(f"📌 Case **{nrzam_input}** już jest Twój.")
+                            st.rerun()
+                        elif status == "taken_by_other":
+                            st.warning(f"⚠️ Case **{nrzam_input}** jest przydzielony do: **{case_data.get('assigned_to', '?')}**. Wklej wsad w prawym panelu.")
+                        elif status == "completed":
+                            st.info(f"ℹ️ Case **{nrzam_input}** jest zakończony. Wklej wsad w prawym panelu.")
+                        else:
+                            st.warning(f"🔍 Nie znaleziono **{nrzam_input}** w bazie casów. Wklej wsad w prawym panelu.")
+                    else:
+                        st.error("Podaj numer zamówienia!")
             
-            if tag:
-                if case.get("_doc_id"):
-                    ew_complete_case(case["_doc_id"], result_tag=tag, result_pz=pz)
-                # Loguj statystyki + diamenty
-                start_pz = st.session_state.get("current_start_pz", None)
-                end_pz = pz  # PZ z TAGu końcowego
-                proj_idx = st.session_state.get("current_project_idx", 0)
-                log_stats(op_name, start_pz, end_pz, proj_idx)
-                ew_log_completion(op_name)
-                st.session_state.messages = []
-                st.session_state.chat_started = False
-                st.session_state.current_start_pz = None
-                st.session_state._autopilot_loaded = False
-                new_case = ew_get_next_case(operator_grupa, op_name)
-                st.session_state.ew_current_case = new_case
-                st.session_state.ew_wsad_ready = ""
-                if new_case:
-                    st.rerun()
-                else:
-                    st.success("✅ Case zakończony! Brak kolejnych casów w puli.")
-                    st.rerun()
             else:
-                st.error("❌ Brak TAGu w odpowiedzi AI — nie można zakończyć. Kontynuuj rozmowę z AI.")
-
-    if not show_current_case:
-        # === TRYB ODWROTNY (WA/MAIL/FORUM) ===
-        if wybrany_tryb_kod in ("WA", "MAIL", "FORUM"):
-            st.markdown(f"📨 **Wsad odwrotny: {wybrany_tryb_kod}**")
-            nrzam_input = st.text_input("Podaj NrZam:", key="ew_reverse_nrzam", placeholder="np. 369771")
-            
-            if st.button(f"🔍 Szukaj case'a ({wybrany_tryb_kod})", type="primary"):
-                if nrzam_input.strip():
-                    case_data, status = ew_find_case_by_nrzam(nrzam_input.strip(), op_name)
-                    
-                    if status == "reserved":
-                        # Znaleziony i zarezerwowany
-                        case_data["_reverse_mode"] = True
-                        case_data["_reverse_type"] = wybrany_tryb_kod
-                        st.session_state.ew_current_case = case_data
-                        st.success(f"✅ Znaleziono case **{nrzam_input}** — zarezerwowany!")
-                        st.rerun()
-                    elif status == "already_mine":
-                        # Już mój
-                        case_data["_reverse_mode"] = True
-                        case_data["_reverse_type"] = wybrany_tryb_kod
-                        st.session_state.ew_current_case = case_data
-                        st.info(f"📌 Case **{nrzam_input}** już jest Twój.")
-                        st.rerun()
-                    elif status == "taken_by_other":
-                        st.warning(f"⚠️ Case **{nrzam_input}** jest przydzielony do: **{case_data.get('assigned_to', '?')}**. Wklej wsad w prawym panelu.")
-                    elif status == "completed":
-                        st.info(f"ℹ️ Case **{nrzam_input}** jest zakończony. Wklej wsad w prawym panelu.")
-                    else:
-                        # Nie znaleziono w casach
-                        st.warning(f"🔍 Nie znaleziono **{nrzam_input}** w bazie casów. Wklej wsad w prawym panelu.")
+                if avail > 0:
+                    if st.button("📥 Pobierz następny case", type="primary"):
+                        case = ew_get_next_case(operator_grupa, op_name)
+                        if case:
+                            ew_log_taken(op_name)
+                            st.session_state.ew_current_case = case
+                            st.rerun()
+                        else:
+                            st.warning("Brak wolnych casów.")
                 else:
-                    st.error("Podaj numer zamówienia!")
-        
-        # === TRYB STANDARDOWY (kolejka priorytetowa) ===
-        else:
-            if avail > 0:
-                if st.button("📥 Pobierz następny case", type="primary"):
-                    case = ew_get_next_case(operator_grupa, op_name)
-                    if case:
-                        st.session_state.ew_current_case = case
-                        st.rerun()
-                    else:
-                        st.warning("Brak wolnych casów.")
-            else:
-                st.caption("🔍 Brak wolnych casów w Twojej grupie.")
+                    st.caption("🔍 Brak wolnych casów w Twojej grupie.")
 
-    st.markdown("---")
-    # ==========================================
-    # KONIEC SEKCJI WIEŻOWIEC
-    # ==========================================
+        st.markdown("---")
 
     admin_msg = cfg.get("admin_message", "")
     if admin_msg and not cfg.get("message_read", False):
@@ -644,16 +618,13 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("---")
-    # Modele AI — pobierz dostępne z admin config
     ALL_MODELS = {
         "gemini-2.5-pro": "Gemini 2.5 Pro",
         "gemini-3-pro-preview": "Gemini 3 Pro (Preview)",
         "gemini-3.1-pro-preview": "Gemini 3.1 Pro (Preview)",
     }
-    # Kaskadowy fallback — każdy model ma osobną pulę TPM
     FALLBACK_CHAIN = ["gemini-2.5-pro", "gemini-3-pro-preview", "gemini-3.1-pro-preview"]
     
-    # Admin ustawia które modele są dostępne (w global_settings)
     allowed_models = global_cfg.get("allowed_models", ["gemini-2.5-pro", "gemini-3-pro-preview"])
     if isinstance(allowed_models, str):
         allowed_models = [allowed_models]
@@ -663,11 +634,9 @@ with st.sidebar:
     
     model_labels = [ALL_MODELS[m] for m in allowed_models]
     st.radio("Model AI:", model_labels, key="selected_model_label")
-    # Zamień label z powrotem na ID
     label_to_id = {v: k for k, v in ALL_MODELS.items()}
     active_model_id = label_to_id.get(st.session_state.selected_model_label, allowed_models[0])
 
-    # --- PARAMETRY EKSPERYMENTALNE ---
     st.subheader("🧪 Funkcje Eksperymentalne")
     st.toggle("Tryb NOTAG (Tag-Koperta)", key="notag_val", value=True)
     st.toggle("Tryb ANALIZBIOR (Wsad zbiorczy)", key="analizbior_val", value=False)
@@ -680,7 +649,6 @@ with st.sidebar:
     st.markdown("---")
 
     if st.button("🚀 Nowa sprawa / Reset", type="primary"):
-        # Jeśli case wieżowca jest przydzielony ale nie rozpoczęty — oddaj
         if st.session_state.ew_current_case:
             case = st.session_state.ew_current_case
             status = db.collection(col("ew_cases")).document(case["_doc_id"]).get().to_dict().get("status")
@@ -691,10 +659,10 @@ with st.sidebar:
         st.session_state.chat_started = False
         st.session_state.current_start_pz = None
         st.session_state.ew_wsad_ready = ""
+        st.session_state.chat_nrzam = None
         st.rerun()
 
     if st.button("🚪 Wyloguj"):
-        # Oddaj case jeśli jest
         if st.session_state.get("ew_current_case"):
             case = st.session_state.ew_current_case
             try:
@@ -714,6 +682,35 @@ with st.sidebar:
 # ==========================================
 st.title(f"🧪 Szturchacz EW TEST (forum)")
 
+if st.session_state.get("czyste_okno", False) and not st.session_state.get("chat_started", False):
+    st.subheader("🧪 Czyste okno — wklej wsad ręcznie")
+    czyste_wsad = st.text_area("Wklej wsad:", height=200, key="czyste_wsad_input", placeholder="Wklej tu pełną linię szturchacza...")
+    if st.button("🚀 Analizuj", type="primary"):
+        if czyste_wsad.strip():
+            nrzam = None
+            import re as _re
+            _match = _re.search(r'(\d{5,7})', czyste_wsad.strip())
+            if _match:
+                nrzam = _match.group(1)
+            st.session_state.chat_nrzam = nrzam
+            
+            st.session_state.forum_debug_log = [] 
+            
+            if FORUM_ENABLED and nrzam:
+                forum_ctx = auto_load_forum_context(db, col, str(nrzam))
+                if forum_ctx:
+                    czyste_wsad = czyste_wsad.strip() + "\n\n" + forum_ctx
+                    st.toast(f"📖 Forum: kontekst załadowany dla {nrzam}")
+
+            st.session_state.current_start_pz = parse_pz(czyste_wsad) or "PZ_START"
+            st.session_state.messages = [{"role": "user", "content": czyste_wsad.strip()}]
+            st.session_state.chat_started = True
+            st.session_state.ew_wsad_ready = ""
+            st.session_state._autopilot_loaded = False
+            st.rerun()
+        else:
+            st.error("Wsad jest pusty!")
+
 if "chat_started" not in st.session_state: st.session_state.chat_started = False
 
 @st.cache_data(ttl=3600)
@@ -728,7 +725,6 @@ def get_remote_prompt(url):
 
 
 if not st.session_state.chat_started:
-    # Info o case Wieżowca
     case = st.session_state.ew_current_case
     wybrany_tryb_main = st.session_state.get("tryb_label", "Standard")
     tryb_kod_main = {"Standard": "od_szturchacza", "WA": "WA", "MAIL": "MAIL", "FORUM": "FORUM"}.get(wybrany_tryb_main, "od_szturchacza")
@@ -738,7 +734,6 @@ if not st.session_state.chat_started:
     )
     
     if show_case_main and case.get("_reverse_mode", False):
-        # TRYB ODWROTNY — pokaż edytowalne pole z wsadem + miejsce na wpis forum/wa/mail
         reverse_type = case.get("_reverse_type", "FORUM")
         st.subheader(f"📨 {reverse_type} — {case.get('numer_zamowienia', '?')}")
         st.caption(f"{case.get('priority_icon', '')} [{case.get('score', 0)}] {case.get('priority_label', '')}")
@@ -755,6 +750,23 @@ if not st.session_state.chat_started:
         
         if st.button("🚀 Rozpocznij analizę", type="primary"):
             if wsad_input and wsad_input.strip():
+                st.session_state.forum_debug_log = [] 
+                
+                nrzam = case.get("numer_zamowienia", "")
+                if not nrzam:
+                    import re as _re
+                    _nrzam_match = _re.match(r'(\d{5,7})', wsad_input.strip())
+                    if _nrzam_match:
+                        nrzam = _nrzam_match.group(1)
+                
+                st.session_state.chat_nrzam = str(nrzam) if nrzam else None
+                
+                if FORUM_ENABLED and nrzam:
+                    forum_ctx = auto_load_forum_context(db, col, str(nrzam))
+                    if forum_ctx:
+                        wsad_input = wsad_input + "\n\n" + forum_ctx
+                        st.toast(f"📖 Forum: załadowano kontekst dla {nrzam}")
+
                 if case.get("_doc_id"):
                     db.collection(col("ew_cases")).document(case["_doc_id"]).update({
                         "status": "w_toku",
@@ -765,12 +777,12 @@ if not st.session_state.chat_started:
                 st.session_state.chat_started = True
                 st.session_state.ew_wsad_ready = ""
                 st.session_state.ew_forced_tryb = reverse_type
+                st.session_state._autopilot_loaded = False
                 st.rerun()
             else:
                 st.error("Wsad jest pusty!")
     
     elif show_case_main:
-        # TRYB STANDARD — jak było
         st.info(f"🏢 Case z Wieżowca: **{case.get('numer_zamowienia', '?')}** — "
                 f"{case.get('priority_icon', '')} [{case.get('score', 0)}] {case.get('priority_label', '')}\n\n"
                 f"Kliknij **▶️ Rozpocznij ten case** w panelu bocznym.")
@@ -781,7 +793,6 @@ if not st.session_state.chat_started:
         st.info("👈 Pobierz case z Wieżowca (panel boczny).")
 
 else:
-    # CHAT URUCHOMIONY — POBIERANIE PROMPTU I LOGIKA AI
     SYSTEM_PROMPT = get_remote_prompt(PROMPT_URL)
 
     if not SYSTEM_PROMPT:
@@ -794,7 +805,6 @@ else:
     p_notag = "TAK" if st.session_state.notag_val else "NIE"
     p_analizbior = "TAK" if st.session_state.analizbior_val else "NIE"
 
-    # Jeśli wsad odwrotny wymusił tryb — nadpisz
     aktualny_tryb = st.session_state.pop("ew_forced_tryb", None) or wybrany_tryb_kod
 
     parametry_startowe = f"""
@@ -815,15 +825,12 @@ analizbior={p_analizbior}
             vh.append(Content(role=role, parts=[Part.from_text(m["content"])]))
         return vh
 
-    # Wyświetlanie historii
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]): st.markdown(msg["content"])
 
-    # Logika odpowiedzi AI — exponential backoff + fallback
     if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
         with st.chat_message("model"):
             with st.spinner("Analiza przez Vertex AI..."):
-                # Lista modeli: główny + kaskadowy fallback (każdy ma osobną pulę TPM)
                 models_to_try = [active_model_id]
                 for fb in FALLBACK_CHAIN:
                     if fb != active_model_id and fb not in models_to_try:
@@ -839,7 +846,6 @@ analizbior={p_analizbior}
                     
                     for attempt in range(5):
                         try:
-                            # Context caching — jeśli włączony, użyj cache'owanego modelu
                             cached_model = None
                             if caching_enabled:
                                 cached_model = get_or_create_cached_model(model_id, FULL_PROMPT)
@@ -860,39 +866,43 @@ analizbior={p_analizbior}
                             
                             # --- E2: FORUM INTEGRATION ---
                             if FORUM_ENABLED and ("[FORUM_WRITE|" in ai_text or "[FORUM_READ|" in ai_text):
-                                forum_result = execute_forum_actions(ai_text)
+                                _nrzam_e2 = st.session_state.get("chat_nrzam")
+                                
+                                if not _nrzam_e2 and st.session_state.messages:
+                                    import re as _re
+                                    _nrzam_match = _re.search(r'(\d{5,7})', st.session_state.messages[0]["content"])
+                                    if _nrzam_match:
+                                        _nrzam_e2 = _nrzam_match.group(1)
+                                        st.session_state.chat_nrzam = _nrzam_e2
+
+                                _fm_e2 = load_forum_memory(db, col, _nrzam_e2) if _nrzam_e2 else {}
+                                forum_result = execute_forum_actions(ai_text, forum_memory=_fm_e2)
                                 ai_text = forum_result["response"]
                                 
-                                # FORUM_READ → wstrzyknij kontekst i wyślij ponownie do AI
+                                if forum_result["forum_writes"]:
+                                    for fw in forum_result["forum_writes"]:
+                                        if fw.get("success"):
+                                            st.toast(f"✅ Forum: post {fw.get('FORUM_ID', '?')} wysłany")
+                                            if _nrzam_e2 and fw.get("FORUM_ID") and fw.get("cel"):
+                                                save_forum_memory(db, col, _nrzam_e2, fw["cel"], fw.get("FORUM_ID"), fw.get("tresc_skrot", ""))
+                                        else:
+                                            st.toast(f"❌ Forum: {fw.get('error', '?')}")
+                                
                                 if forum_result["forum_reads"]:
                                     forum_context = "\n\n".join(forum_result["forum_reads"])
                                     st.session_state.messages.append({"role": "model", "content": ai_text})
                                     st.session_state.messages.append({"role": "user", "content": forum_context})
                                     st.toast("📖 Forum: pobrano kontekst, AI analizuje...")
-                                    st.rerun()  # AI odpowie na forum_context w następnym renderze
-                                
-                                # FORUM_WRITE → pokaż wynik z linkami + ZAPISZ DO PAMIĘCI
-                                if forum_result["forum_writes"]:
-                                    nrzam = st.session_state.get("ew_current_case", {}).get("numer_zamowienia", "")
-                                    for fw in forum_result["forum_writes"]:
-                                        if fw.get("success"):
-                                            st.toast(f"✅ Forum: post {fw.get('FORUM_ID', '?')} wysłany")
-                                            # Zapisz do pamięci trwałej
-                                            if nrzam and fw.get("FORUM_ID") and fw.get("cel"):
-                                                save_forum_memory(db, col, nrzam, fw["cel"], fw["FORUM_ID"], fw.get("tresc_skrot", ""))
-                                        else:
-                                            st.toast(f"❌ Forum: {fw.get('error', '?')}")
+                                    st.rerun()
                             # --- KONIEC E2 ---
                             
                             st.markdown(ai_text)
                             st.session_state.messages.append({"role": "model", "content": ai_text})
                             used_model = model_id
 
-                            # Info o fallbacku
                             if is_fallback:
                                 st.info(f"⚡ Odpowiedź z **{ALL_MODELS.get(model_id, model_id)}** — główny model przeciążony")
 
-                            # Logowanie statystyk (identyczne jak prod)
                             if (';pz=' in ai_text.lower() or 'cop#' in ai_text.lower()) and 'c#' in ai_text.lower():
                                 log_stats(op_name, st.session_state.current_start_pz, parse_pz(ai_text) or "PZ_END", project_index)
 
@@ -901,7 +911,7 @@ analizbior={p_analizbior}
                         except Exception as e:
                             err_str = str(e)
                             if "429" in err_str or "Quota" in err_str or "ResourceExhausted" in err_str or "503" in err_str or "unavailable" in err_str.lower():
-                                wait_time = min(5 * (attempt + 1), 10)  # 5s, 10s, 10s (max 25s total)
+                                wait_time = min(5 * (attempt + 1), 10)  
                                 model_label = ALL_MODELS.get(model_id, model_id)
                                 st.toast(f"⏳ {model_label}: próba {attempt+1}/5, czekam {wait_time}s...")
                                 time.sleep(wait_time)
@@ -924,7 +934,6 @@ analizbior={p_analizbior}
 # POLE WSADU (gdy chat nie jest uruchomiony)
 # ==========================================
 if not st.session_state.chat_started:
-    # Pokaż pole ręcznego wsadu gdy nie ma aktywnego case'a do wyświetlenia
     if not show_case_main:
         st.subheader(f"📥 Pierwszy wsad ({op_name})")
         if wybrany_tryb_kod != "od_szturchacza":
@@ -939,6 +948,21 @@ if not st.session_state.chat_started:
 
         if st.button("🚀 Rozpocznij analizę", type="primary"):
             if wsad_input:
+                st.session_state.forum_debug_log = []
+                
+                _nrzam_clean = None
+                import re as _re
+                _match = _re.search(r'(\d{5,7})', wsad_input.strip())
+                if _match:
+                    _nrzam_clean = _match.group(1)
+                st.session_state.chat_nrzam = _nrzam_clean
+                
+                if FORUM_ENABLED and _nrzam_clean:
+                    forum_ctx = auto_load_forum_context(db, col, _nrzam_clean)
+                    if forum_ctx:
+                        wsad_input = wsad_input + "\n\n" + forum_ctx
+                        st.toast(f"📖 Forum: kontekst załadowany dla {_nrzam_clean}")
+                
                 st.session_state.current_start_pz = parse_pz(wsad_input) or "PZ_START"
                 st.session_state.messages = [{"role": "user", "content": wsad_input}]
                 st.session_state.chat_started = True
@@ -946,3 +970,12 @@ if not st.session_state.chat_started:
                 st.rerun()
             else:
                 st.error("Wsad jest pusty!")
+
+# --- FORUM DEBUG PANEL ---
+if st.session_state.get("forum_debug_log"):
+    with st.expander("🔍 Forum Debug Log", expanded=False):
+        for line in st.session_state.forum_debug_log:
+            st.code(line, language=None)
+        if st.button("🗑️ Wyczyść debug log"):
+            st.session_state.forum_debug_log = []
+            st.rerun()
