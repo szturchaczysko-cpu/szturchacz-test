@@ -438,7 +438,7 @@ _FORUM_THREADS_PROD = {
     },
     "NIEPOZAMYKANE_AUSTAUSCHE": {
         "post_id": 3730, "korzen_id": None,
-        "grupa": "Niepozamykane_Austausche", "grupa_type": 2,
+        "grupa": "NIEPOZAMYKANE AUSTAUSCHE", "grupa_type": 2,
         "opis": "Niezamknięte Austausche / zielonka (§10.5)",
     },
     "CZATOSZTUR_DE": {
