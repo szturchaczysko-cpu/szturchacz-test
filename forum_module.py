@@ -90,11 +90,8 @@ def forum_write(post_id, do_odp_id, user_do, tresc, user_do_type=1, user_od=None
       - chatoszturek (default) → wpis idzie od bota (autopilot)
       - Operatorzy_DE/FR/UK/PL → wpis idzie z grupy, w nawiasie pojawi się ai_user
     
-    ai_user: nick tego, KTO realnie spowodował wpis — operator (np. "kasia_k",
-             "oliwia_m") przy akcji zalogowanego operatora, albo "chatoszturek"
-             przy autonomicznym wpisie autopilota. Trafia do pola AiUser w
-             payloadzie — to z niego forum renderuje widoczny "(nick)". Gdy puste
-             → fallback na FORUM_USER (chatoszturek).
+    ai_user: nick operatora który stoi za botem (np. "klaudia", "kasia_k", "oliwia_m").
+             Wyświetla się na forum jako "GRUPA (nick)".
     """
     if user_od is None:
         user_od = FORUM_USER
@@ -127,12 +124,6 @@ def forum_write(post_id, do_odp_id, user_do, tresc, user_do_type=1, user_od=None
             "title": tytul,
             "private": False,
             "AiGenerated": 1,
-            # AiUser = nick tego, KTO realnie spowodował wpis: operator (np. kasia_k,
-            # oliwia_m) gdy wpis wywołała akcja zalogowanego operatora, albo
-            # "chatoszturek" (= FORUM_USER) gdy autonomicznie zadziałał autopilot.
-            # Forum renderuje widoczny "(nick)" WŁAŚNIE z AiUser. Fallback na
-            # FORUM_USER gdy ai_user puste. (AiUser MOŻE być człowiekiem — case 378520
-            # dowodzi, że ludzkie nicki zapisują się bez błędu.)
             "AiUser": ai_user if ai_user else FORUM_USER,
         }
     }
