@@ -854,6 +854,19 @@ def ew_apply_tel_forum_wynik(ai_text, grupa_sprawy=None, numer=None):
     if not _mk:
         return None
     _pend = ew_pending_do_oceny(numer) if numer else (st.session_state.get("_tel_forum_pending") or [])
+    if not _pend and numer:
+        # 🟥 Kategoria NIE idzie w próżnię: AI nadał wynik, a rekordów „do oceny" nie ma —
+        #    czyli pisarz ich jeszcze nie stworzył. NAJPIERW dopisujemy rekordy z forum,
+        #    potem aplikujemy tag. Ponowny zapis jest bezpieczny: kluczem jest numer wpisu
+        #    forum sprawdzany w logu, więc istniejące rozmowy nie zdublują się.
+        try:
+            ew_log_telefonista_calls(
+                numer, None,
+                doc_id=(st.session_state.get("ew_current_case") or {}).get("_doc_id"),
+                grupa=grupa_sprawy)
+        except Exception:
+            pass
+        _pend = ew_pending_do_oceny(numer)
     if not _pend:
         return None
     _zrobione = []
@@ -1227,7 +1240,7 @@ def ew_log_ponaglenia_bota(numer, grupa=None):
     return _ile
 
 
-def ew_log_telefonista_calls(numer, forum_ctx, doc_id=None, grupa=None):
+def ew_log_telefonista_calls(numer, forum_ctx, doc_id=None, grupa=None, okno_dni_roboczych=5):
     """Zapisuje telefon telefonistki TYLKO wtedy, gdy jej odpowiedź wisi POD NASZYM wpisem
     zlecenia (albo pod jego podbiciem). Powiązanie idzie po numerach wpisów z forum —
     nie po godzinach i nie po samej obecności w wątku.
@@ -1265,6 +1278,24 @@ def ew_log_telefonista_calls(numer, forum_ctx, doc_id=None, grupa=None):
 
     _tz = pytz.timezone('Europe/Warsaw')
     _today = datetime.now(_tz).strftime("%Y-%m-%d")
+
+    # 🟥 KLUCZ GŁÓWNY dedupu: numer wpisu forum sprawdzany W SAMYM LOGU, nie w dokumencie
+    #    sprawy. Sprawa dostaje NOWY dokument każdego dnia (nowy batch), więc sygnatury
+    #    per sprawa nie chronią między dniami — rozmowa 1615975 weszła 14, 17 i 18.08.
+    #    Log rozmów jest jeden, więc to on jest źródłem prawdy o „już zapisane".
+    _nr_log = str(numer or "").strip()
+    _juz_w_logu = set()
+    for _i_l in range(14):
+        _ds_l = (datetime.now(_tz) - timedelta(days=_i_l)).strftime("%Y-%m-%d")
+        try:
+            for _d_l in db.collection(col("ew_phone_log")).document(_ds_l).collection("calls") \
+                         .where("numer_zamowienia", "==", _nr_log).limit(30).stream():
+                _pid_l = str((_d_l.to_dict() or {}).get("post_id") or "").strip()
+                if _pid_l:
+                    _juz_w_logu.add(_pid_l)
+        except Exception:
+            pass
+
     _pending, _nowe_sygn, _ile = [], [], 0
 
     for _p in _posty:
@@ -1291,28 +1322,31 @@ def ew_log_telefonista_calls(numer, forum_ctx, doc_id=None, grupa=None):
         _dzien = _czas[:10] or _today
         _godz = _czas[11:16] or datetime.now(_tz).strftime("%H:%M")
         # 🟥 Odpowiedź sprzed kilku dni roboczych to historia, nie bieżąca praca operatora.
+        #    Okno jest parametrem: ekran operatora zostaje przy 5, skan domykający dostaje
+        #    szersze (spóźnione otwarcia nie mogą ginąć tylko dlatego, że nikt nie zdążył).
         try:
             _d_odp = _tz.localize(datetime.strptime(f"{_dzien} {_godz}", "%Y-%m-%d %H:%M"))
-            if _dni_robocze_od(_d_odp, datetime.now(_tz)) > 5:
+            if _dni_robocze_od(_d_odp, datetime.now(_tz)) > okno_dni_roboczych:
                 continue
         except Exception:
             pass
-        # 🟥 DUPLIKAT: ta sama osoba, ta sama treść, ta sama sprawa = jeden telefon
-        #    zaraportowany dwa razy (np. odpowiedź na delegację i na ponaglenie).
-        #    Rozpoznajemy po treści, bo odstęp bywa i pół godziny.
-        _tresc_norm = re.sub(r"\s+", " ", str(_p.get("Tekst") or "").lower()).strip()[:120]
-        # 🟥 Dwie PRÓBY to dwa telefony — nawet z identyczną treścią („nie odbiera" rano
-        #    i po południu). Rozstrzyga GODZINA wpisu: ta sama treść w tym samym kwadransie
-        #    to duplikat (odpowiedź na delegację i na ponaglenie), później to druga próba.
-        # 🟥 Każda odpowiedź na forum to OSOBNY wpis o własnym numerze — dwie odpowiedzi
-        #    tej samej osoby w tej samej sprawie to DWA telefony. Duplikatem jest tylko
-        #    ten sam wpis odczytany ponownie, dlatego klucz zawiera ID wpisu.
-        _kwadrans = f"{_dzien} {_godz[:3]}{int(_godz[3:5]) // 15 if len(_godz) >= 5 else 0}"
-        _sygn_tresc = f"D|{_aut}|{_osoba}|{_tresc_norm}|{_kwadrans}|{_pid}"
-        if _tresc_norm and (_sygn_tresc in _stare or _sygn_tresc in _nowe_sygn):
+        # 🟥 KLUCZ GŁÓWNY: numer wpisu forum. Ten sam wpis odczytany ponownie — dziś,
+        #    za trzy dni, w nowym dokumencie sprawy — nie tworzy drugiego rekordu.
+        _post_id = str(_p.get("Id") or "").strip()
+        _sygn = _post_id
+        if _sygn and (_sygn in _juz_w_logu or _sygn in _stare or _sygn in _nowe_sygn):
             continue
-        _sygn = f"{_p.get('Id')}"
-        if _sygn in _stare:
+        # 🟥 DUPLIKAT TREŚCI — dopiero PO kluczu z id i tylko w obrębie TEJ SAMEJ sprawy:
+        #    ta sama osoba, ta sama treść, ten sam kwadrans = jeden telefon zaraportowany
+        #    dwa razy (np. odpowiedź na delegację i na ponaglenie — dwa RÓŻNE wpisy forum).
+        #    Ta sama treść w innym kwadransie („nie odbiera" rano i po południu) to druga
+        #    próba, nie duplikat. Sygnatura NIE zawiera numeru wpisu — wcześniej wchodziła
+        #    tu zmienna _pid z cudzej pętli i sygnatura kleiła się losowo (zjadała różne
+        #    raporty), a duplikat między RÓŻNYMI wpisami z definicji ma różne numery.
+        _tresc_norm = re.sub(r"\s+", " ", str(_p.get("Tekst") or "").lower()).strip()[:120]
+        _kwadrans = f"{_dzien} {_godz[:3]}{int(_godz[3:5]) // 15 if len(_godz) >= 5 else 0}"
+        _sygn_tresc = f"D|{_aut}|{_osoba}|{_tresc_norm}|{_kwadrans}"
+        if _tresc_norm and (_sygn_tresc in _stare or _sygn_tresc in _nowe_sygn):
             continue
         # 🟥 Jasny komunikat rozpoznajemy OD RAZU — kolejka ręczna zostaje dla niejasnych.
         # 🟥 Najpierw: czy to w ogóle telefon? Cytat z WA/eBay, „ok", anulowanie —
@@ -1354,7 +1388,9 @@ def ew_log_telefonista_calls(numer, forum_ctx, doc_id=None, grupa=None):
                 "created_at": firestore.SERVER_TIMESTAMP,
             })
             _pending.append({"dzien": _dzien, "id": _res[1].id, "numer": str(numer or "").strip()})
-            _nowe_sygn.append(_sygn)
+            if _sygn:
+                _nowe_sygn.append(_sygn)
+                _juz_w_logu.add(_sygn)
             if _tresc_norm:
                 _nowe_sygn.append(_sygn_tresc)
             _ile += 1
