@@ -18,7 +18,7 @@ from streamlit_cookies_manager import EncryptedCookieManager
 
 # --- MODUŁ FORUM ---
 try:
-    from forum_module import execute_forum_actions, discover_roots, auto_load_forum_context, save_forum_memory, load_forum_memory, parse_forum_markers, ostatnie_posty
+    from forum_module import execute_forum_actions, discover_roots, auto_load_forum_context, save_forum_memory, load_forum_memory, parse_forum_markers, ostatnie_posty, otwiera_prosbe
     FORUM_ENABLED = True
 except ImportError:
     FORUM_ENABLED = False
@@ -1135,6 +1135,8 @@ def _nasze_id_zlecen(numer, dni_wstecz=30):
                         "id": _pid,
                         "typ": _v.get("typ") or "zlecenie",
                         "kiedy": f'{_ds} {_v.get("godzina", "00:00")}',
+                        "korzen": str(_v.get("korzen_post_id") or "").strip(),
+                        "korzen_dzien": str(_v.get("korzen_dzien") or "").strip()[:10],
                     })
         except Exception as _e:
             # 🟥 Nie wyciszamy. Brak indeksu/uprawnień = ZERO znalezionych zleceń,
@@ -1146,6 +1148,21 @@ def _nasze_id_zlecen(numer, dni_wstecz=30):
     if not _wszystkie:
         return {}
     _wszystkie.sort(key=lambda r: r["kiedy"])
+    # 🟥 ŻELAZNY KORZEŃ: gdy najświeższy wpis to podbicie z korzeniem, bieżącą prośbą jest łańcuch
+    #    tego korzenia — korzeń (choćby spoza 30 dni) wchodzi do zbioru, więc odpowiedź telefonistki
+    #    wprost pod nim dalej wiąże się z prośbą.
+    _ost = _wszystkie[-1]
+    if _ost["typ"] == "ponaglenie" and _ost.get("korzen"):
+        _root = _ost["korzen"]
+        _w_oknie = next((r for r in _wszystkie if r["id"] == _root), None)
+        _root_kiedy = (_w_oknie["kiedy"] if _w_oknie
+                       else (f'{_ost["korzen_dzien"]} 00:00' if _ost.get("korzen_dzien") else _ost["kiedy"]))
+        _out = {_root: {"typ": "zlecenie", "kiedy": _root_kiedy}}
+        for _r in _wszystkie:
+            if _r["typ"] == "ponaglenie" and (_r.get("korzen") == _root
+                                              or (not _r.get("korzen") and _r["kiedy"] >= _root_kiedy)):
+                _out[_r["id"]] = {"typ": "ponaglenie", "kiedy": _r["kiedy"]}
+        return _out
     # najświeższe ZLECENIE (nie podbicie) wyznacza aktualną prośbę
     _zl = [r for r in _wszystkie if r["typ"] == "zlecenie"]
     if not _zl:
@@ -1157,6 +1174,82 @@ def _nasze_id_zlecen(numer, dni_wstecz=30):
         if _r["typ"] == "ponaglenie" and _r["kiedy"] >= _akt["kiedy"]:
             _out[_r["id"]] = {"typ": "ponaglenie", "kiedy": _r["kiedy"]}
     return _out
+
+
+def _nasz_wpis(_p):
+    """Czy wpis w pamięci wątku napisał Szturchacz — operator przez AI (grupa OPERATORZY_*)
+    albo nocny automat (chatoszturek). Wpisy wklejone ręcznie przez ludzi się nie liczą:
+    rejestr ich nie ma, więc nie mogą być korzeniem."""
+    _a = str(_p.get("Autor") or "").strip()
+    _o = str(_p.get("Osoba") or "").strip()
+    return (_a.upper().startswith("OPERATORZY") or "chatoszturek" in (_a + " " + _o).lower()
+            or "Chatoszturkiem" in str(_p.get("Tekst") or ""))
+
+
+def _rekord_delegacji(numer, dzien, id_postu, z_ref=False):
+    """JEDEN odczyt rejestru: rekord ew_phone_log/{dzien}/delegacje tej sprawy o danym numerze
+    wpisu forum (albo None). Dzień znamy z forum, więc nie przeszukujemy dni wstecz.
+    z_ref=True → (rekord, [referencje WSZYSTKICH kopii o tym numerze wpisu]) — do naprawy w miejscu;
+    stary dedup (14 dni od dziś) zostawił w rejestrze zdublowane rekordy bota, naprawiamy każdą kopię."""
+    _nr = str(numer or "").strip()
+    _pid = str(id_postu or "").strip()
+    _dz = str(dzien or "").strip()[:10]
+    if not (_nr and _pid and re.fullmatch(r"\d{4}-\d{2}-\d{2}", _dz)):
+        return (None, []) if z_ref else None
+    _pierwszy, _refs = None, []
+    try:
+        for _d in db.collection(col("ew_phone_log")).document(_dz).collection("delegacje") \
+                   .where("numer_zamowienia", "==", _nr).limit(50).stream():
+            _v = _d.to_dict() or {}
+            if str(_v.get("id_postu") or "").strip() == _pid:
+                if not z_ref:
+                    return _v
+                if _pierwszy is None:
+                    _pierwszy = _v
+                _refs.append(_d.reference)
+    except Exception:
+        pass
+    return (_pierwszy, _refs) if z_ref else None
+
+
+def _korzen_delegacji(numer, do_kogo, posty, przed=None, moje_id=None, tresc=None):
+    """🟥 ŻELAZNY KORZEŃ (decyzja właścicielki 04.09.2026): o typie wpisu do telefonistów decyduje
+    jego TREŚĆ. Nowa prośba (nagłówek „Delegacja telefonu" bez słów kontynuacji) = nowe zlecenie →
+    (None, None). Kontynuacja (druga próba, ponowienie, ponaglenie, anulowanie, raport…) = podbicie
+    NAJŚWIEŻSZEJ prośby Szturchacza do tej samej grupy (adresat bez wielkości liter; operator
+    i automat liczą się tak samo; BEZ okna czasowego) → (korzen_post_id, korzen_dzien). Gdy sprawa
+    ma do tej grupy tylko podbicia (prośba sprzed rejestru), korzeniem jest najstarsze z nich;
+    gdy nie ma nic — (None, None) i podbicie zostaje sierotą (rejestr ma dla niej korzeń zastępczy).
+    Wcześniej: 14 dni, tylko operator, adresat co do litery — 92 rekordy w 3 tygodnie miały typ
+    niezgodny z treścią."""
+    if tresc is not None and otwiera_prosbe(tresc):
+        return None, None
+    _norm = lambda s: str(s or "").strip().casefold()
+    _adr = _norm(do_kogo)
+    if not _adr:
+        return None, None
+    _kand = []
+    for _p in (posty or []):
+        if not _nasz_wpis(_p) or _norm(_p.get("Do_kogo")) != _adr:
+            continue
+        _pid = str(_p.get("Id") or "").strip()
+        if not _pid or (moje_id is not None and _pid == str(moje_id).strip()):
+            continue
+        _cz = str(_p.get("Czas") or "")
+        if przed and _cz and _cz >= str(przed):
+            continue
+        _kand.append((_cz, int(_pid) if _pid.isdigit() else 0, _pid, _p))
+    if not _kand:
+        return None, None
+    _kand.sort(key=lambda t: (t[0], t[1]))
+    _prosby = [t for t in _kand if otwiera_prosbe(t[3].get("Naglowek") if t[3].get("Naglowek") is not None
+                                                  else t[3].get("Tekst"))]
+    _cz, _i, _pid, _p = (_prosby[-1] if _prosby else _kand[0])
+    _dz = _cz[:10] if re.match(r"\d{4}-\d{2}-\d{2}", _cz) else ""
+    _rek = _rekord_delegacji(numer, _dz, _pid) if _dz else None
+    if _rek and str(_rek.get("korzen_post_id") or "").strip():
+        return str(_rek.get("korzen_post_id")).strip(), str(_rek.get("korzen_dzien") or _dz)[:10]
+    return _pid, _dz
 
 
 def ew_log_ponaglenia_bota(numer, grupa=None):
@@ -1174,6 +1267,7 @@ def ew_log_ponaglenia_bota(numer, grupa=None):
         return 0
     _tz = pytz.timezone('Europe/Warsaw')
     _ile = 0
+    _zapisane_teraz = set()
     for _p in _posty:
         # 🟥 Wpis bota jest podpisany „OPERATORZY_DE (chatoszturek)", a _rozbij_autora
         #    przenosi nazwę z nawiasu do pola Osoba. Szukanie tylko w Autorze nigdy
@@ -1196,46 +1290,68 @@ def ew_log_ponaglenia_bota(numer, grupa=None):
         if not _pid:
             continue
         _czas = str(_p.get("Czas") or "")
-        _dzien = _czas[:10] or datetime.now(_tz).strftime("%Y-%m-%d")
+        _dzien = _czas[:10] if re.match(r"\d{4}-\d{2}-\d{2}", _czas) else datetime.now(_tz).strftime("%Y-%m-%d")
         _godz = _czas[11:16] or "00:00"
+        # 🟥 Adresat z wpisu (pamięć wątku niesie UserToName); zgadujemy grupę tylko, gdy go brak.
+        #    Wcześniej pamięć nie niosła adresata i KAŻDY wpis automatu lądował pod „Telefoniści_XX",
+        #    także ponaglenia do justyny czy EA — rejestr odsiewa je teraz po prawdziwym adresacie.
+        _do_kogo = (str(_p.get("Do_kogo") or _p.get("UserToName") or "").strip()
+                    or ("Telefoniści_" + str(grupa or "").upper() if grupa else ""))
         try:
-            # duplikat sprawdzamy w 14 dniach — wpis bota może być starszy niż dzisiejszy dzień
-            _dubel = False
-            for _i_b in range(14):
-                _ds_b = (datetime.now(_tz) - timedelta(days=_i_b)).strftime("%Y-%m-%d")
-                _juz = db.collection(col("ew_phone_log")).document(_ds_b).collection("delegacje") \
-                         .where("numer_zamowienia", "==", _nr).limit(30).stream()
-                if any(str((_d.to_dict() or {}).get("id_postu") or "") == _pid for _d in _juz):
+            # 🟥 DUBEL sprawdzamy w DNIU WPISU (rekord bota leży pod datą wpisu) i dniu następnym
+            #    (zapis tuż po północy) — nie w 14 dniach, bo starszy wpis wchodził drugi raz.
+            if _pid in _zapisane_teraz:
+                continue
+            # rodzaj wpisu liczymy z NAGŁÓWKA (surowy HTML) — Tekst jest obcięty i bez <b>
+            _nagl = _p.get("Naglowek") if _p.get("Naglowek") is not None else _txt
+            _dubel, _rek_d, _refy_d = False, None, []
+            for _i_b in range(2):
+                try:
+                    _ds_b = (datetime.strptime(_dzien, "%Y-%m-%d") + timedelta(days=_i_b)).strftime("%Y-%m-%d")
+                except Exception:
+                    _ds_b = _dzien
+                _rek_d, _refy_d = _rekord_delegacji(_nr, _ds_b, _pid, z_ref=True)
+                if _rek_d is not None:
                     _dubel = True
                     break
             if _dubel:
-                continue
-            # czy w tej sprawie jest już JAKIKOLWIEK wpis telefoniczny (14 dni wstecz)
-            _byl_wpis = False
-            for _i_h in range(14):
-                _ds_h = (datetime.now(_tz) - timedelta(days=_i_h)).strftime("%Y-%m-%d")
+                # 🟥 Rekord tego wpisu już jest — najczęściej zapisał go nocny automat w chwili
+                #    publikacji, regułą „był jakikolwiek wpis w 14 dniach", bez korzenia. Naprawiamy
+                #    go RAZ w miejscu (typ + korzeń) — każdą kopię — zamiast dopisywać kolejny.
                 try:
-                    _h = db.collection(col("ew_phone_log")).document(_ds_h).collection("delegacje") \
-                           .where("numer_zamowienia", "==", _nr).limit(5).stream()
-                    if any(True for _ in _h):
-                        _byl_wpis = True
-                        break
+                    if (_refy_d and _rek_d.get("bot") and not _rek_d.get("korzen_sprawdzony")
+                            and not str(_rek_d.get("korzen_post_id") or "").strip()):
+                        _korzen_n, _kdz_n = _korzen_delegacji(_nr, _do_kogo, _posty, przed=(_czas[:16] or None),
+                                                              moje_id=_pid, tresc=_nagl)
+                        _upd = {"korzen_sprawdzony": True}
+                        if otwiera_prosbe(_nagl):
+                            _upd["typ"] = "zlecenie"
+                        elif _korzen_n:
+                            _upd.update({"typ": "ponaglenie", "korzen_post_id": str(_korzen_n),
+                                         "korzen_dzien": str(_kdz_n or "")})
+                        for _r_d in _refy_d:
+                            _r_d.update(_upd)
                 except Exception:
                     pass
+                continue
+            # 🟥 ŻELAZNY KORZEŃ: treść decyduje — nowa prośba = zlecenie, kontynuacja = podbicie
+            #    NAJŚWIEŻSZEJ prośby do tej grupy (bez okna czasowego); rekord niesie korzeń.
+            #    Kontynuacja, która nie ma czego podbijać (brak wcześniejszego wpisu do grupy), OTWIERA
+            #    wiersz jak zlecenie — inaczej rejestr nie liczyłby jej do niewykonanych.
+            _korzen, _korzen_dzien = _korzen_delegacji(_nr, _do_kogo, _posty, przed=(_czas[:16] or None),
+                                                       moje_id=_pid, tresc=_nagl)
             db.collection(col("ew_phone_log")).document(_dzien).collection("delegacje").add({
                 "numer_zamowienia": _nr,
-                # 🟥 Jeśli w tej sprawie JUŻ JEST jakikolwiek wpis telefoniczny (nasz albo bota),
-                #    kolejny wpis automatu to PODBICIE, nie nowe zlecenie. Bez tego każde nocne
-                #    ponaglenie tworzyło osobny wiersz i tabela puchła.
-                "typ": ("zlecenie" if (_jest_del and not _byl_wpis) else "ponaglenie"),
+                "typ": ("ponaglenie" if (_korzen and not otwiera_prosbe(_nagl)) else "zlecenie"),
+                "korzen_post_id": str(_korzen or ""), "korzen_dzien": str(_korzen_dzien or ""),
                 "zlecil": "chatoszturek (automat)", "zlecil_dzwoniacy": False,
                 "grupa": grupa or "?",
-                "do_kogo": (str(_p.get("Do_kogo") or _p.get("UserToName") or "").strip()
-                            or ("Telefoniści_" + str(grupa or "").upper() if grupa else "")),
+                "do_kogo": _do_kogo,
                 "id_postu": _pid, "link": "", "tresc": _txt[:300],
                 "data_str": _dzien, "godzina": _godz, "bot": True,
                 "created_at": firestore.SERVER_TIMESTAMP,
             })
+            _zapisane_teraz.add(_pid)
             _ile += 1
         except Exception:
             pass
@@ -1410,34 +1526,31 @@ def ew_anuluj_zlecenie(numer, dni_wstecz=30):
 
 
 def ew_log_deleg(op_name, numer, grupa, do_kogo, jezyk=None, pz=None,
-                 id_postu=None, link=None, dzwoniacy=None, recznie=False, tresc=None):
+                 id_postu=None, link=None, dzwoniacy=None, recznie=False, tresc=None, anulowane=False):
     """Trwały log ZLECENIA telefonu (wpis delegujący na forum poszedł skutecznie).
     Ten sam kontener co telefony wykonane: ew_phone_log/{data}/delegacje.
     Rejestr w Wieżowcu łączy zlecenia z wykonaniami po numerze zamówienia."""
     tz_pl = pytz.timezone('Europe/Warsaw')
     today = datetime.now(tz_pl).strftime("%Y-%m-%d")
-    # Kolejny wpis do TEJ SAMEJ grupy w TEJ SAMEJ sprawie = PONAGLENIE, nie nowe zlecenie.
+    # 🟥 ŻELAZNY KORZEŃ: o typie decyduje TREŚĆ wpisu (decyzja właścicielki 04.09.2026) —
+    #    nowa prośba = zlecenie (nowy wiersz), kontynuacja = ponaglenie NAJŚWIEŻSZEJ prośby do tej grupy
+    #    (bez okna czasowego, adresat bez wielkości liter, automat liczy się jak operator); rekord niesie
+    #    korzen_post_id i korzen_dzien. Wcześniej: 14 dni, tylko operator, adresat co do litery —
+    #    podbicia stawały się nowymi wierszami rejestru, a nowe prośby doklejały się do starych.
     _typ = "zlecenie"
+    _korzen, _korzen_dzien = None, None
     try:
-        # 🟥 Szukamy w ostatnich 14 DNIACH, nie tylko dziś — podbicie wpisu sprzed kilku dni
-        #    to nadal podbicie, a nie nowe zlecenie. Wcześniej każde takie wychodziło
-        #    jako osobne zlecenie i zawyżało liczby.
-        _nr_t = str(numer or "").strip()
-        for _i_t in range(14):
-            _ds_t = (datetime.now(tz_pl) - timedelta(days=_i_t)).strftime("%Y-%m-%d")
-            _hist = db.collection(col("ew_phone_log")).document(_ds_t).collection("delegacje") \
-                      .where("numer_zamowienia", "==", _nr_t).limit(20).stream()
-            # 🟥 Liczy się TYLKO wcześniejszy wpis OPERATORA. Nocne podbicie automatu nie może
-            #    sprawiać, że poranne zlecenie operatora zostanie uznane za podbicie —
-            #    a wtedy znikało z tabeli, bo podbicia nie tworzą wierszy.
-            if any(((d.to_dict() or {}).get("do_kogo") == (do_kogo or "")
-                    and not (d.to_dict() or {}).get("bot")) for d in _hist):
-                _typ = "ponaglenie"
-                break
+        _korzen, _korzen_dzien = _korzen_delegacji(numer, do_kogo, ostatnie_posty(str(numer or "").strip()),
+                                                   moje_id=id_postu, tresc=tresc)
+        # kontynuacja bez czego podbijać (brak wcześniejszego wpisu do grupy) otwiera wiersz jak zlecenie
+        if _korzen and tresc is not None and not otwiera_prosbe(tresc):
+            _typ = "ponaglenie"
     except Exception:
         pass
     doc = {
         "typ": _typ,                             # zlecenie | ponaglenie
+        "korzen_post_id": str(_korzen or ""),    # 🟥 najświeższa prośba, którą to podbicie podbija
+        "korzen_dzien": str(_korzen_dzien or ""),  # dzień korzenia w rejestrze — jeden odczyt zamiast szukania
         "recznie": bool(recznie),                # wpis wklejony ręcznie po błędzie API forum
         "numer_zamowienia": str(numer or "").strip(),
         "zlecil": op_name,                       # imiennie — wiemy, kto był zalogowany
@@ -1453,6 +1566,8 @@ def ew_log_deleg(op_name, numer, grupa, do_kogo, jezyk=None, pz=None,
         "godzina": datetime.now(tz_pl).strftime("%H:%M"),
         "created_at": firestore.SERVER_TIMESTAMP,
     }
+    if anulowane:
+        doc["anulowane"] = True        # 🟥 rekord samego wpisu anulującego też jest zamknięty
     try:
         db.collection(col("ew_phone_log")).document(today).collection("delegacje").add(doc)
     except Exception:
@@ -2837,6 +2952,7 @@ jezyki_dzwoniacy={_jezyki_str}
                                                     id_postu=(fw.get("new_post_id") or fw.get("FORUM_ID")), link=fw.get("link"),
                                                     tresc=_tr_fw,
                                                     dzwoniacy=get_phone_cfg(op_name)[0],
+                                                    anulowane=bool(_to_anul or _to_koniec_tel),
                                                 )
                                         else:
                                             st.toast(f"❌ Forum: {fw.get('error', '?')}")
@@ -2850,6 +2966,7 @@ jezyki_dzwoniacy={_jezyki_str}
                                                     "numer": _nrzam_e2, "do_kogo": _ud_f,
                                                     "jezyk": _tel_deleg_lang, "pz": parse_pz(ai_text) or _ccf.get("pz") or "",
                                                     "doc_id": _ccf.get("_doc_id"),
+                                                    "tresc": _tr_fw,      # 🟥 treść decyduje o typie w rejestrze
                                                 }
                                     
                                     # --- v1.5.7c: last_action_source w ew_cases ---
@@ -3315,7 +3432,7 @@ jezyki_dzwoniacy={_jezyki_str}
                             grupa=operator_grupa, do_kogo=_fb.get("do_kogo"),
                             jezyk=_fb.get("jezyk"), pz=_fb.get("pz"),
                             id_postu=_mid.group(1), link="", dzwoniacy=get_phone_cfg(op_name)[0],
-                            recznie=True,
+                            recznie=True, tresc=_fb.get("tresc"),
                         )
                         _docf = _fb.get("doc_id") or _docx
                         if _docf:

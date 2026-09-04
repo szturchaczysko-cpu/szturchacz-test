@@ -23,6 +23,8 @@ Nick bota: chatoszturek
 
 import re
 import json
+import html as _html
+import time as _czas_proc
 import requests
 import traceback
 import streamlit as st
@@ -42,10 +44,21 @@ _KLUCZ_SESJI = "_forum_ostatnie_posty"
 def _zapamietaj_posty(nrzam, posty):
     """🟥 Trzymamy strukturę w DWÓCH miejscach: pamięć procesu (szybka) i sesja Streamlit
     (przeżywa przeładowanie). Bez tego drugiego treść i imię ginęły między odczytem wątku
-    a zapisem rozmowy — a wtedy klasyfikator dostawał pusty tekst."""
+    a zapisem rozmowy — a wtedy klasyfikator dostawał pusty tekst.
+    🟥 ŻELAZNY KORZEŃ: wpisy SCALAMY po numerze, zamiast nadpisywać. Sprawa bywa czytana
+    z dwóch wątków (reklamacje po DE) — drugi odczyt kasował pierwszy i pisarz rejestru
+    nie widział prośby, pod którą stało podbicie."""
     _nr = str(nrzam or "").strip()
     if not _nr:
         return
+    _po_id = {}
+    for _p in (ostatnie_posty(_nr) or []):
+        if _p.get("Id") is not None:
+            _po_id[str(_p.get("Id"))] = _p
+    for _p in (posty or []):
+        if _p.get("Id") is not None:
+            _po_id[str(_p.get("Id"))] = _p
+    posty = sorted(_po_id.values(), key=lambda _p: (str(_p.get("Czas") or ""), str(_p.get("Id"))))
     _OSTATNIE_POSTY[_nr] = posty
     try:
         _mapa = st.session_state.get(_KLUCZ_SESJI) or {}
@@ -69,6 +82,79 @@ def ostatnie_posty(nrzam):
         return (st.session_state.get(_KLUCZ_SESJI) or {}).get(_nr, [])
     except Exception:
         return []
+
+
+_WATEK_SPRAWDZONY = {}      # (numer, wątek) → wątek przeczytany po numerze w tej sesji (kotwica_sprawy)
+
+
+def _dopisz_post(nrzam, post):
+    """Wpis wysłany przed chwilą od razu wchodzi do pamięci sesji — druga próba w tej samej
+    sesji widzi pierwszą bez ponownego czytania forum."""
+    _zapamietaj_posty(nrzam, [post])
+
+
+def _wpis_o_sprawie(p, nrzam):
+    """Czy wpis forum dotyczy sprawy: 2 = tytuł to numer zamówienia (tak piszą nasze wpisy),
+    1 = „Zamówienie…: numer" w treści (także powiązane / dosyłki / główne), 0 = nie dotyczy.
+    Goły numer w treści cudzego wpisu (telefon, list przewozowy) NIE liczy się — 7 razy na 1283
+    wskazywał obcy podwątek."""
+    _nr = str(nrzam or "").strip()
+    if not _nr:
+        return 0
+    if str(p.get("Title") or "").strip() == _nr:
+        return 2
+    _t = _html.unescape(str(p.get("Text") or p.get("Tekst") or ""))
+    if re.search(r"Zam[óo]wieni\w*[^<\d]{0,40}?" + re.escape(_nr) + r"(?!\d)", _t, re.IGNORECASE):
+        return 1
+    return 0
+
+
+def _nasz_wpis_pamieci(p):
+    """Czy wpis (w kształcie pamięci sesji ALBO surowym z forum) napisał Szturchacz: konto grupy
+    OPERATORZY_* (operator przez AI), automat „chatoszturek" albo stopka Chatoszturka."""
+    _a = str(p.get("Autor") or p.get("UserAddName") or "").strip()
+    _o = str(p.get("Osoba") or p.get("UserOdInGroup") or "").strip()
+    return (_a.upper().startswith("OPERATORZY") or "chatoszturek" in (_a + " " + _o).lower()
+            or "Chatoszturkiem" in str(p.get("Tekst") or p.get("Text") or ""))
+
+
+# 🟥 RODZAJ WPISU decyduje o miejscu na forum i o typie w rejestrze (decyzja właścicielki 04.09.2026):
+#    NOWA PROŚBA (nagłówek zaczyna prośbę i nie ma słów kontynuacji) → nowy podwątek na wierzchu wątku
+#    i nowe zlecenie w rejestrze; wszystko inne = KONTYNUACJA → pod najświeższą prośbą do tego samego
+#    adresata, w rejestrze podbicie z korzeniem. Bez okna czasowego.
+_RE_KONTYNUACJA = re.compile(
+    r"druga pr[óo]b|trzeci[ae] pr[óo]b|kolejn[ae] pr[óo]b|ponow|ponawiam|ponagl|przypomn|kontynuacj|"
+    r"\bbump\b|drugi obieg|obieg 2|brak odpowiedzi|brak ruchu|brak wyniku|eskalacj|anulow|anuluj|"
+    r"wyczerpan|nie ponawiamy|telefon wykonany|wynik telefonu|aktualizacj|po kotwicy|"
+    r"restart cyklu|dopyt", re.IGNORECASE)     # UWAGA: bez „nieudan" — „Delegacja telefonu — po nieudanej
+                                               # próbie operatora" to PIERWSZE zlecenie dla telefonistów (szablon §8.4)
+_RE_OTWIERAJACY = re.compile(
+    r"^\s*(delegacja telefonu|delegacja zadania|pro[śs]ba o|zapytanie|pytanie|reklamacja|zg[łl]oszenie|"
+    r"zlecenie|nowe zg[łl]oszenie|problem proceduralny|dosy[łl]ka|status reklamacji|informacja o reklamacji|"
+    r"weryfikacja|kurier)", re.IGNORECASE)
+
+
+def naglowek_wpisu(tresc):
+    """Nagłówek wpisu: pierwsze <b>…</b> (tak piszą nasze wpisy) albo początek tekstu bez HTML.
+    Najpierw odkodowujemy encje: ręczna wklejka (TRYB A) wraca z forum jako &lt;b&gt;Delegacja…,
+    a „druga pr&oacute;ba" bez odkodowania nie trafiała w słowa kontynuacji."""
+    _t = _html.unescape(str(tresc or "")).replace("\xa0", " ")
+    _m = re.match(r"\s*(?:<[^>]+>\s*)*<b>(.*?)</b>", _t, re.S)
+    _h = _m.group(1) if _m else re.sub(r"<[^>]+>", " ", _t)[:150]
+    return re.sub(r"<[^>]+>", " ", _h).strip()
+
+
+def otwiera_prosbe(tresc):
+    """True = wpis otwiera NOWĄ prośbę (nowy podwątek, nowe zlecenie); False = kontynuacja."""
+    _h = naglowek_wpisu(tresc)
+    return bool(_RE_OTWIERAJACY.search(_h)) and not _RE_KONTYNUACJA.search(_h)
+
+
+def _otwiera_z_pamieci(p):
+    """Rodzaj wpisu z pamięci sesji: po zapamiętanym nagłówku (liczonym z surowego HTML —
+    pole Tekst jest obcięte do 300 znaków i bez <b>), a gdy go brak — po Tekst."""
+    _n = p.get("Naglowek")
+    return otwiera_prosbe(_n if _n is not None else (p.get("Tekst") or p.get("Text") or ""))
 
 
 def _rozbij_autora(nazwa, osoba_pole=""):
@@ -420,6 +506,8 @@ def forum_read(branch_id=None, root_id=None, leaf_id=None, max_pages=5,
                     "DateAdd": p.get("DateAdd", ""),
                     "Level": p.get("Level", 0),
                     "Hierarchy": p.get("Hierarchy", ""),
+                    "LevelZero": p.get("LevelZero"),           # korzeń podwątku
+                    "Title": p.get("Title", ""),               # nasze wpisy: tytuł = numer zamówienia
                 })
             
             paging = tree.get("PagingInfo", {})
@@ -822,30 +910,48 @@ def execute_forum_actions(ai_response, forum_memory=None, user_od=None, ai_user=
             # Nowy = cel jeszcze NIE ma wpisu w pamięci forum dla tego nrzam ORAZ AI nie wskazało
             # jawnie do_odp_id (kontynuacji). Odpowiedź pod istniejącym podwątkiem ≠ nowy diament.
             _cel_existed_before = bool(forum_memory) and (cel in forum_memory)
-
-            # 🟥 ZABEZPIECZENIE PRZED ROZBICIEM WĄTKU. Pamięć bywa pusta (nie zapisała się,
-            #    wpis powstał poza systemem), a wtedy powstawał NOWY korzeń mimo aktywnego
-            #    podwątku — historia sprawy rozpadała się na dwa miejsca.
-            #    Szukamy w SAMYM WĄTKU po parze: NUMER ZAMÓWIENIA + CEL.
-            #    Uwaga: jeden wątek forum gromadzi wiele zamówień, a jedno zamówienie
-            #    ma osobne podwątki dla różnych celów (telefon, reklamacja, pismo).
             _nrzam_w = str((diamond_meta or {}).get("numer_zamowienia") or "").strip()
-            if (not _cel_existed_before) and (not do_odp_id) and _nrzam_w:
+            _watek_w = _watek_celu(cel)
+            _pamiec_dla_zapisu = forum_memory
+            _rodzaj_w = "wskazany" if do_odp_id else ""
+            if _watek_w and _watek_w in _watki_kotwicy():
+                # 🟥 ŻELAZNY KORZEŃ (wątki Czatosztur): o miejscu wpisu decyduje jego TREŚĆ.
+                #    Nowa prośba (Delegacja telefonu, Prośba o pismo, Zapytanie…) zakłada NOWY podwątek
+                #    na wierzchu wątku — telefoniści widzą ją jako świeżą, nie wraca pod stary wpis.
+                #    Kontynuacja (druga próba, ponowienie, ponaglenie, eskalacja, anulowanie, raport…)
+                #    staje pod NAJŚWIEŻSZĄ prośbą do tego samego adresata — bez limitu wieku.
+                #    Jawne do_odp_id od AI zostaje. Wcześniej: pamięć kluczowana celem co do litery
+                #    („czatosztur_de" ≠ „CZATOSZTUR_DE") + „pierwszy zapis wygrywa" → 87 kontynuacji
+                #    luzem i 307 pod starszą prośbą w 3 tygodnie.
+                _cel_existed_before = bool(forum_memory) and any(_watek_celu(_k) == _watek_w for _k in forum_memory)
+                if do_odp_id:
+                    _rodzaj_w = "wskazany"
+                elif otwiera_prosbe(tresc):
+                    _rodzaj_w = "nowa_prosba"
+                    _pamiec_dla_zapisu = None          # nowy podwątek — NIE wracamy do pamięci
+                else:
+                    _rodzaj_w = "kontynuacja"
+                    try:
+                        do_odp_id = kotwica_sprawy(_nrzam_w, cel, user_do, forum_memory, db=db,
+                                                   col_fn=(lambda _n: f"{diamond_prefix}{_n}"))
+                    except Exception as _e_w:
+                        _flog(f"KOTWICA BLAD: {_e_w}")
+                        do_odp_id = None
+                    if not do_odp_id:
+                        _pamiec_dla_zapisu = None      # sprawa nie ma prośby w tym wątku → luzem
+                _flog(f"RODZAJ WPISU: {_rodzaj_w} nrzam={_nrzam_w} cel={cel} do={user_do} -> do_odp_id={do_odp_id}")
+            elif (not _cel_existed_before) and (not do_odp_id) and _nrzam_w:
+                # wątki poza regułą (kurierski, spedycja, niepozamykane, błędy): jak dotąd —
+                # najnowszy podwątek tej sprawy z pamięci sesji, ale tylko z TEGO wątku
                 try:
-                    _posty_w = ostatnie_posty(_nrzam_w) or []
                     _kand_w = []
-                    for _p_w in _posty_w:
-                        if str(_p_w.get("Nrzam") or _nrzam_w).strip() != _nrzam_w:
-                            continue
-                        # ten sam cel = ten sam wątek docelowy
-                        if cel and str(_p_w.get("Cel") or "").strip() and \
-                           str(_p_w.get("Cel")).strip().upper() != str(cel).strip().upper():
+                    for _p_w in (ostatnie_posty(_nrzam_w) or []):
+                        if _p_w.get("Watek") is not None and str(_p_w.get("Watek")) != str(_watek_w):
                             continue
                         _id_w = str(_p_w.get("Do_Odpid") or _p_w.get("Id") or "").strip()
                         if _id_w:
                             _kand_w.append((str(_p_w.get("Czas") or ""), _id_w))
                     if _kand_w:
-                        # kilka podwątków tego celu → bierzemy NAJNOWSZY
                         _kand_w.sort()
                         do_odp_id = _kand_w[-1][1]
                         _cel_existed_before = True
@@ -860,7 +966,7 @@ def execute_forum_actions(ai_response, forum_memory=None, user_od=None, ai_user=
                 tresc=tresc,
                 user_do=user_do,
                 do_odp_id=do_odp_id,
-                forum_memory=forum_memory,
+                forum_memory=_pamiec_dla_zapisu,
                 user_od=user_od,
                 ai_user=ai_user,
                 tytul=tytul,
@@ -873,12 +979,15 @@ def execute_forum_actions(ai_response, forum_memory=None, user_od=None, ai_user=
                 if ("uprawnie" in _err_txt.lower() or "406" in _err_txt
                         or "not acceptable" in _err_txt.lower()):
                     _flog(f"PODPIECIE ODMOWA ({_err_txt[:80]}) -> zakładam nowy podwątek")
+                    # 🟥 bez pamięci trwałej — ona wskazuje ten sam odmówiony podwątek
+                    do_odp_id = None
+                    _rodzaj_w = "nowy_po_odmowie"
                     result = forum_write_to_thread(
                         cel=cel,
                         tresc=tresc,
                         user_do=user_do,
                         do_odp_id=None,
-                        forum_memory=forum_memory,
+                        forum_memory=None,
                         user_od=user_od,
                         ai_user=ai_user,
                         tytul=tytul,
@@ -893,8 +1002,39 @@ def execute_forum_actions(ai_response, forum_memory=None, user_od=None, ai_user=
             forum_writes.append(result)
             
             if result.get("success"):
-                if cel not in forum_memory:
-                    forum_memory[cel] = {"id": result.get("FORUM_ID"), "new_subthread": USE_NEW_SUBTHREADS}
+                _cel_k = _cel_kanoniczny(cel)
+                _nowy_id = result.get("FORUM_ID")
+                if _watek_w and _watek_w in _watki_kotwicy():
+                    # pamięć trwała wskazuje NAJŚWIEŻSZY podwątek sprawy w tym wątku
+                    if not do_odp_id and _nowy_id:
+                        _stary_id = (_pamiec_watku(cel, forum_memory) or 0)
+                        if int(_nowy_id) > int(_stary_id):
+                            forum_memory[_cel_k] = {"id": _nowy_id, "new_subthread": USE_NEW_SUBTHREADS}
+                elif cel not in forum_memory:
+                    forum_memory[cel] = {"id": _nowy_id, "new_subthread": USE_NEW_SUBTHREADS}
+                result["rodzaj"] = _rodzaj_w
+                result["do_odp_id"] = do_odp_id          # efektywny rodzic wpisu (None = luzem)
+                # wpis sprzed chwili od razu w pamięci sesji — pisarz rejestru i druga próba go widzą
+                if _nrzam_w and _nowy_id:
+                    try:
+                        _teraz_w = datetime.now(_TZ_PL) if _TZ_PL is not None else datetime.now()
+                        _rodz_w = None
+                        for _p_w in (ostatnie_posty(_nrzam_w) or []):
+                            if do_odp_id and str(_p_w.get("Id")) == str(do_odp_id):
+                                _rodz_w = _p_w
+                                break
+                        _dopisz_post(_nrzam_w, {
+                            "Id": _nowy_id, "Do_Odpid": (do_odp_id or 0), "Hierarchy": "",
+                            "Autor": str(user_od or FORUM_USER), "Osoba": str(ai_user or FORUM_USER),
+                            "Czas": _teraz_w.strftime("%Y-%m-%d %H:%M"),
+                            "Tekst": _strip_html(str(tresc or ""))[:300], "Naglowek": naglowek_wpisu(tresc),
+                            "Do_kogo": str(user_do or ""),
+                            "Level": (1 if do_odp_id else 0),
+                            "LevelZero": ((_rodz_w or {}).get("LevelZero") or do_odp_id or _nowy_id),
+                            "Watek": _watek_w,
+                        })
+                    except Exception as _e_d:
+                        _flog(f"DOPISZ_POST BLAD: {_e_d}")
                 
                 # === DIAMENT v1.5.7d "pomijamyPZ6": KAŻDY udany post na AUTOS_KURIERZY analizowany ===
                 # Warunek odpalenia: cel == AUTOS_KURIERZY (lub testowy KURIER_test) AND success AND db.
@@ -1215,6 +1355,114 @@ def _get_thread_raw(cel):
     return None
 
 
+def _cel_kanoniczny(cel):
+    """Nazwa celu tak, jak stoi w FORUM_THREADS (AI pisze raz „CZATOSZTUR_DE", raz „czatosztur_de")."""
+    if not cel or cel in FORUM_THREADS:
+        return cel
+    for _k in FORUM_THREADS:
+        if _k.lower() == str(cel).lower():
+            return _k
+    return cel
+
+
+def _watek_celu(cel):
+    """post_id wątku forum dla celu — bez wielkości liter; aliasy UK/PL/UKPL wskazują jeden wątek."""
+    _info = _get_thread_raw(cel) if cel else None
+    return _info.get("post_id") if _info else None
+
+
+def _watki_kotwicy():
+    """Wątki objęte regułą rodzaju wpisu (DE 5690, FR 5689, UK/PL 5691, reklamacje 5688 — cele
+    CZATOSZTUR_*). Wątek kurierski (AUTOS_KURIERZY) i pozostałe zostają na dotychczasowej logice:
+    tam „nowy podwątek" znaczy „diament" i zmiana psułaby liczenie zleceń kurierskich."""
+    return {info.get("post_id") for k, info in FORUM_THREADS.items() if str(k).upper().startswith("CZATOSZTUR")}
+
+
+def _pamiec_watku(cel, forum_memory):
+    """NAJŚWIEŻSZY podwątek z pamięci trwałej dla WĄTKU celu (każdy klucz wskazujący ten wątek,
+    bez względu na wielkość liter i alias)."""
+    _w = _watek_celu(cel)
+    _ids = []
+    for _k, _info in (forum_memory or {}).items():
+        if not isinstance(_info, dict):
+            continue
+        if (_watek_celu(_k) == _w) if _w else (str(_k).lower() == str(cel).lower()):
+            try:
+                _i = int(str(_info.get("id") or "").strip())
+                if _i > 0:
+                    _ids.append(_i)
+            except Exception:
+                pass
+    return max(_ids) if _ids else None
+
+
+def kotwica_sprawy(nrzam, cel, user_do, forum_memory=None, db=None, col_fn=None):
+    """🟥 ŻELAZNY KORZEŃ — pod czym ma stanąć KONTYNUACJA sprawy: id NAJŚWIEŻSZEJ prośby Szturchacza
+    w wątku celu do tego samego adresata; gdy do tego adresata nic nie było — najświeższej prośby
+    sprawy w tym wątku; gdy prośby nie ma — korzeń najświeższego podwątku sprawy; None = sprawa nie ma
+    w tym wątku żadnego wpisu (wpis idzie luzem). Bez limitu wieku.
+    Źródła: pamięć sesji (wpisy sprawy z tego wątku); gdy pusta — jeden odczyt wątku po numerze
+    (raz na sprawę i wątek w sesji; zmierzone 04.09.2026: GetPostTree oddaje cały wątek jedną stroną);
+    na końcu pamięć trwała (najświeższy zapisany podwątek)."""
+    _nr = str(nrzam or "").strip()
+    _watek = _watek_celu(cel)
+    if not _watek:
+        return None
+    _adr = str(user_do or "").strip().casefold()
+
+    def _z_sesji():
+        _posty = [p for p in (ostatnie_posty(_nr) if _nr else []) if str(p.get("Watek")) == str(_watek)]
+        _prosby = [p for p in _posty if _nasz_wpis_pamieci(p) and _otwiera_z_pamieci(p)]
+        _do_adr = [p for p in _prosby if str(p.get("Do_kogo") or "").strip().casefold() == _adr] if _adr else []
+        for _zbior in (_do_adr, _prosby):
+            if _zbior:
+                _p = max(_zbior, key=lambda q: int(q.get("Id") or 0))
+                return _p.get("Id")
+        if _posty:
+            _p = max(_posty, key=lambda q: int(q.get("Id") or 0))
+            return _p.get("LevelZero") or _p.get("Id")
+        return None
+
+    _k = _z_sesji()
+    _spr = _WATEK_SPRAWDZONY.get((_nr, _watek))
+    if _k is None and _nr and _spr is not True and (not _spr or _czas_proc.time() - _spr > 300):
+        try:
+            _res = forum_read(root_id=_watek, max_pages=5)
+            if not _res.get("success"):
+                # awaria forum (timeout) — ponów przy następnym wpisie po 5 min, nie na zawsze
+                _WATEK_SPRAWDZONY[(_nr, _watek)] = _czas_proc.time()
+                raise RuntimeError(str(_res.get("error") or "brak danych"))
+            _WATEK_SPRAWDZONY[(_nr, _watek)] = True     # wątek przeczytany — dość na czas życia procesu
+            _znalezione = []
+            for _p in ((_res.get("posts") or []) if _res.get("success") else []):
+                if not _wpis_o_sprawie(_p, _nr):
+                    continue
+                _lz = _p.get("LevelZero") or (_p.get("Do_Odpid") or _p.get("Id"))
+                _znalezione.append({
+                    "Id": _p.get("Id"), "Do_Odpid": _p.get("Do_Odpid"), "Hierarchy": _p.get("Hierarchy", ""),
+                    **_rozbij_autora(_p.get("UserAddName", ""), _p.get("UserOdInGroup", "")),
+                    "Czas": _czas_lokalny(_p.get("DateAdd")),
+                    "Tekst": _strip_html(str(_p.get("Text") or ""))[:300],
+                    "Naglowek": naglowek_wpisu(_p.get("Text")),
+                    "Do_kogo": str(_p.get("UserToName") or ""), "Level": _p.get("Level", 0),
+                    "LevelZero": _lz, "Watek": _watek,
+                })
+            if _znalezione:
+                _zapamietaj_posty(_nr, _znalezione)
+            _flog(f"KOTWICA: odczyt wątku {_watek} dla {_nr}: wpisów sprawy {len(_znalezione)}")
+            _k = _z_sesji()
+            if _k and db is not None and col_fn is not None:
+                try:
+                    save_forum_memory(db, col_fn, _nr, _cel_kanoniczny(cel), _k, "kotwica: najświeższa prośba w wątku")
+                except Exception as _e_s:
+                    _flog(f"KOTWICA: zapis pamięci nie wyszedł: {_e_s}")
+        except Exception as _e_k:
+            _flog(f"KOTWICA: odczyt wątku nie wyszedł: {_e_k}")
+    if _k is None:
+        _k = _pamiec_watku(cel, forum_memory)
+    return _k
+
+
 def forum_write_to_thread(cel, tresc, user_do=None, do_odp_id=None, forum_memory=None, user_od=None, ai_user=None, tytul=None):
     info = get_thread_info(cel)
     if not info:
@@ -1224,7 +1472,7 @@ def forum_write_to_thread(cel, tresc, user_do=None, do_odp_id=None, forum_memory
     # === TYTUŁ = NUMER ZAMÓWIENIA z treści (zawsze) ===
     # AI w treści zawsze pisze "Zamówienie: 374593" — to wyciągamy jako tytuł.
     # Reszta (zlecenie kuriera, delegacja telefonu itp.) jest w treści wpisu.
-    _nrzam_match = re.search(r'Zamówienie[:\s]+(\d{5,7})', tresc)
+    _nrzam_match = re.search(r'Zam[óo]wieni\w*[^<\d]{0,30}?(\d{5,7})', tresc)
     tytul = _nrzam_match.group(1) if _nrzam_match else None
     
     _flog(f"WRITE_TO_THREAD: cel={cel}, tytul='{tytul}', do_odp_id={do_odp_id}, USE_NEW={USE_NEW_SUBTHREADS}, user_od={user_od}, ai_user={ai_user}")
@@ -1232,9 +1480,9 @@ def forum_write_to_thread(cel, tresc, user_do=None, do_odp_id=None, forum_memory
     if do_odp_id:
         target_do_odp = do_odp_id
         _flog(f"  DECYZJA: explicit do_odp_id={do_odp_id}")
-    elif forum_memory and cel in forum_memory:
-        target_do_odp = forum_memory[cel].get("id")
-        _flog(f"  DECYZJA: kontynuacja z forum_memory, target={target_do_odp}")
+    elif forum_memory and _pamiec_watku(cel, forum_memory):
+        target_do_odp = _pamiec_watku(cel, forum_memory)
+        _flog(f"  DECYZJA: kontynuacja z forum_memory (po wątku), target={target_do_odp}")
     elif USE_NEW_SUBTHREADS:
         target_do_odp = None
         _flog(f"  DECYZJA: NOWY PODWĄTEK (USE_NEW=True, do_odp_id=None)")
@@ -1304,7 +1552,17 @@ def save_forum_memory(db, col_fn, numer_zamowienia, cel, forum_id, co=""):
     tz_pl = pytz.timezone('Europe/Warsaw')
     data_str = datetime.now(tz_pl).strftime("%Y-%m-%d %H:%M")
     
+    cel = _cel_kanoniczny(cel)
     _flog(f"SAVE_MEMORY: nrzam={numer_zamowienia}, cel={cel}, forum_id={forum_id}")
+    # czy zapisywany wpis jest korzeniem podwątku (Level 0)? — wiemy z pamięci sesji
+    _jest_korzeniem = None
+    try:
+        for _p_s in (ostatnie_posty(numer_zamowienia) or []):
+            if str(_p_s.get("Id")) == str(forum_id):
+                _jest_korzeniem = not _p_s.get("Do_Odpid")
+                break
+    except Exception:
+        _jest_korzeniem = None
     
     entry = {
         "id": forum_id,
@@ -1318,9 +1576,21 @@ def save_forum_memory(db, col_fn, numer_zamowienia, cel, forum_id, co=""):
         existing = doc_ref.get()
         if existing.exists:
             existing_posts = existing.to_dict().get("forum_posts", {})
-            if cel in existing_posts:
-                _flog(f"  → JUŻ ISTNIEJE (nie nadpisuję, pierwotny id={existing_posts[cel].get('id')})")
-                return
+            _w_s = _watek_celu(cel)
+            for _k_s, _v_s in existing_posts.items():
+                if _k_s == cel or (_w_s and _watek_celu(_k_s) == _w_s):
+                    try:
+                        _stary_id = int(str((_v_s or {}).get("id") or "0"))
+                        _nowy_id = int(str(forum_id or "0"))
+                    except Exception:
+                        _stary_id, _nowy_id = 0, 0
+                    if _jest_korzeniem and _nowy_id > _stary_id and _w_s in _watki_kotwicy():
+                        # 🟥 nowy podwątek sprawy → pamięć wskazuje NAJŚWIEŻSZĄ prośbę
+                        doc_ref.update({f"forum_posts.{_k_s}": entry})
+                        _flog(f"  → KOTWICA PRZESUNIĘTA na najświeższy podwątek (klucz {_k_s}: {_stary_id} → {_nowy_id})")
+                        return
+                    _flog(f"  → JUŻ ISTNIEJE (klucz {_k_s}, id={(_v_s or {}).get('id')}) — nie nadpisuję")
+                    return
         doc_ref.update({f"forum_posts.{cel}": entry})
         _flog(f"  → ZAPISANO (update)")
     except Exception:
@@ -1396,6 +1666,11 @@ def auto_load_forum_context(db, col_fn, numer_zamowienia):
                         **_rozbij_autora(p.get("UserAddName", ""), p.get("UserOdInGroup", "")),
                         "Czas": _czas_lokalny(p.get("DateAdd")),
                         "Tekst": _strip_html(str(p.get("Text") or ""))[:300],
+                        "Naglowek": naglowek_wpisu(p.get("Text")),  # rodzaj wpisu liczony z surowego HTML
+                        "Do_kogo": p.get("UserToName", ""),        # adresat — pisarz rejestru porównuje grupę
+                        "Level": p.get("Level", 0),
+                        "LevelZero": p.get("LevelZero") or (p.get("Id") if not p.get("Do_Odpid") else None),
+                        "Watek": root_id,                           # z którego wątku forum pochodzi wpis
                     } for p in result["posts"]])
                 except Exception:
                     pass
@@ -1527,16 +1802,18 @@ def _scan_forum_for_case(db, col_fn, numer_zamowienia):
             if not result.get("success") or not result.get("posts"):
                 continue
             
-            for post in result["posts"]:
-                if post.get("UserAddName") != FORUM_USER:
-                    continue
+            # 🟥 ŻELAZNY KORZEŃ: nasze wpisy idą z konta GRUPY (OPERATORZY_DE (login)), nie z konta
+            #    „chatoszturek" — dotychczasowy filtr po autorze nie znajdował NICZEGO, więc sprawa
+            #    bez dokumentu pamięci wyglądała na nieobecną na forum. Do pamięci idzie NAJŚWIEŻSZA
+            #    prośba sprawy (albo najświeższy nasz wpis), rozpoznana po tytule = numer
+            #    lub „Zamówienie: numer" w treści.
+            _nasze_w_watku = [post for post in result["posts"]
+                              if _nasz_wpis_pamieci(post) and post.get("Id") and _wpis_o_sprawie(post, nrzam)]
+            _prosby_s = [post for post in _nasze_w_watku if otwiera_prosbe(post.get("Text"))]
+            _wybrane = max((_prosby_s or _nasze_w_watku), key=lambda q: int(q.get("Id") or 0), default=None)
+            for post in ([_wybrane] if _wybrane else []):
                 text = post.get("Text", "")
-                if nrzam not in text:
-                    continue
-                
                 post_forum_id = post.get("Id")
-                if not post_forum_id:
-                    continue
                 
                 text_lower = text.lower()
                 matched_cel = None
