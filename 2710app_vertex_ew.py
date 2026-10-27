@@ -493,59 +493,70 @@ ALL_OPERATORS = [
 
 
 def ew_get_next_case(grupa, op_name):
+    """🟥 KOLEJKA OPERATORKI (karta „Dług dnia”, 27.10.2026) — tylko WŁASNA grupa.
+    Kolejność pobierania:
+      (a) moje sprawy przeliczone na dziś,
+      (b) ZALEGŁE z mojej grupy (termin NEXT / doręczenie wcześniej niż dziś) — najstarsze najpierw,
+          bez względu na to, czy i dla kogo przeliczone,
+      (c) sprawy na dziś innych osób z grupy (najpierw z tym samym ustawieniem telefonu),
+          potem nieprzeliczone z terminem na dziś,
+      (d) reszta (wg oceny).
+    Najpierw SORTOWANIE całej puli grupy, dopiero potem wybór — koniec z przypadkowym wycinkiem 500.
+    Woreczek telefoniczny, sprawy czekające na forum i pominięte w tej sesji — jak dotąd poza kolejką."""
     skipped_ids = st.session_state.get("ew_skipped_ids", set())
     my_tel = get_phone_cfg(op_name)[0]
-    
+    _teraz = datetime.now(pytz.timezone('Europe/Warsaw'))
+    _dzis = _teraz.strftime("%Y-%m-%d")
+    # dziennik dnia budowany jest przy wgraniu wsadu — dopuszczamy też wczorajszy (np. przed porannym wgraniem)
+    _wczoraj = (_teraz - timedelta(days=3 if _teraz.weekday() == 0 else 1)).strftime("%Y-%m-%d")
+
     try:
         q = (db.collection(col("ew_cases"))
              .where("grupa", "==", grupa)
              .where("status", "==", "wolny")
-             .limit(500))
-        all_free_raw = q.get()
-        all_free_raw = sorted(all_free_raw, key=lambda d: d.to_dict().get("score", 0), reverse=True)
-        # Case w WORECZKU telefonicznym NIE jest w puli standardu (obsługiwany telefonem, nie 2x).
-        all_free = [d for d in all_free_raw if d.id not in skipped_ids
+             .limit(5000))
+        all_free = [d for d in q.get() if d.id not in skipped_ids
                     and not (d.to_dict() or {}).get("telefon_do_wykonania")]
     except Exception:
         return None
-    
+
     if not all_free:
         return None
-    
-    prio1 = []  
-    prio2 = []  
-    prio3 = []  
-    prio4 = []  
-    
+
+    _kandydaci = []   # (klucz_sortowania, doc)
     for d in all_free:
-        data = d.to_dict()
+        data = d.to_dict() or {}
         # Pomiń forum_action — czeka na uwolnienie nocnych ruchów
         if data.get("autopilot_status") == "forum_action":
             continue
-        assigned_op = data.get("autopilot_assigned_to", "")
+        assigned_op = data.get("autopilot_assigned_to", "") or ""
         is_calculated = data.get("autopilot_status") == "calculated"
-        
+        _od = str(data.get("dlug_od") or "")[:10]
+        _dd_dlug = str(data.get("dlug_dzien") or "")[:10]
+        if not _dd_dlug or _dd_dlug < _wczoraj:
+            _od = ""          # oznaczenie z dawnego dziennika — nieaktualne
+        _zalegla = bool(_od) and _od < _dzis
+        _na_dzis = bool(_od) and _od <= _dzis
+        _score = -(data.get("score", 0) or 0)
+
         if is_calculated and assigned_op == op_name:
-            prio1.append(d)
+            _klucz = (0, _od or "9999", _score)                       # (a)
+        elif _zalegla:
+            _klucz = (1, _od, _score)                                 # (b) najstarsze najpierw
         elif is_calculated and assigned_op:
-            other_tel = get_phone_cfg(assigned_op)[0]
-            if other_tel == my_tel:
-                prio2.append(d)
-            else:
-                # Bez względu na TEL — case przypisany komuś innemu trafia do prio4
-                prio4.append(d)
+            _same_tel = get_phone_cfg(assigned_op)[0] == my_tel
+            _klucz = (2, "0" if _same_tel else "1", _score)            # (c) cudze na dziś
+        elif _na_dzis:
+            _klucz = (3, _od, _score)                                 # (c') nieprzeliczone na dziś
         else:
-            prio3.append(d)
-    
-    doc = None
-    for candidates in [prio1, prio2, prio3, prio4]:
-        if candidates:
-            doc = candidates[0] 
-            break
-    
-    if not doc:
+            _klucz = (4, "", _score)                                  # (d) reszta
+        _kandydaci.append((_klucz, d))
+
+    if not _kandydaci:
         return None
-    
+    _kandydaci.sort(key=lambda x: x[0])
+    doc = _kandydaci[0][1]
+
     db.collection(col("ew_cases")).document(doc.id).update({
         "status": "przydzielony",
         "assigned_to": op_name,
@@ -569,7 +580,7 @@ def ew_get_fresh_case(grupa, op_name):
         q = (db.collection(col("ew_cases"))
              .where("grupa", "==", grupa)
              .where("status", "==", "wolny")
-             .limit(500))
+             .limit(5000))
         all_free_raw = q.get()
         all_free_raw = sorted(all_free_raw, key=lambda d: d.to_dict().get("score", 0), reverse=True)
         # Case w WORECZKU telefonicznym NIE jest w puli standardu (obsługiwany telefonem, nie 2x).
@@ -627,7 +638,7 @@ def ew_count_fresh_available(grupa):
         q = (db.collection(col("ew_cases"))
              .where("grupa", "==", grupa)
              .where("status", "==", "wolny")
-             .limit(500))
+             .limit(5000))
         all_free = q.get()
         unprocessed = 0
         calculated = 0
@@ -663,7 +674,7 @@ def ew_get_pool_diagnostics(grupa, op_name):
         q = (db.collection(col("ew_cases"))
              .where("grupa", "==", grupa)
              .where("status", "==", "wolny")
-             .limit(500))
+             .limit(5000))
         all_free = q.get()
         diag["total_wolne"] = len(all_free)
         
@@ -726,7 +737,7 @@ def ew_release_case(case_doc_id):
 
 def ew_count_available(grupa):
     # Case'y w woreczku telefonicznym NIE liczą się do puli standardu (są obsługiwane telefonem).
-    _docs = db.collection(col("ew_cases")).where("grupa", "==", grupa).where("status", "==", "wolny").limit(500).get()
+    _docs = db.collection(col("ew_cases")).where("grupa", "==", grupa).where("status", "==", "wolny").limit(5000).get()
     return sum(1 for d in _docs if not (d.to_dict() or {}).get("telefon_do_wykonania"))
 
 def _norm_ymd(v):
